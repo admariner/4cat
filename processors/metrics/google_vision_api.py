@@ -9,7 +9,7 @@ import csv
 from pathlib import Path
 
 from common.lib.helpers import UserInput, convert_to_int
-from backend.abstract.processor import BasicProcessor
+from backend.lib.processor import BasicProcessor
 from common.lib.exceptions import ProcessorInterruptedException
 
 __author__ = "Stijn Peeters"
@@ -34,19 +34,21 @@ class GoogleVisionAPIFetcher(BasicProcessor):
                   "requests will be credited by Google to the owner of the API token you provide!"# description displayed in UI
     extension = "ndjson"  # extension of result file, used internally and in UI
 
+    followups = ["convert-google-vision-to-csv", "vision-bipartite-network", "vision-label-network"]
+
     references = [
         "[Google Vision API Documentation](https://cloud.google.com/vision/docs)",
         "[Google Vision API Pricing & Free Usage Limits](https://cloud.google.com/vision/pricing)"
     ]
 
     @classmethod
-    def is_compatible_with(cls, module=None):
+    def is_compatible_with(cls, module=None, user=None):
         """
         Allow processor on image sets
 
-        :param module: Dataset or processor to determine compatibility with
+        :param module: Module to determine compatibility with
         """
-        return module.type.startswith("image-downloader")
+        return module.get_media_type() == "image" or module.type.startswith("image-downloader") or module.type == "video-frames"
 
     options = {
         "amount": {
@@ -93,23 +95,27 @@ class GoogleVisionAPIFetcher(BasicProcessor):
         features = [{"type": feature} for feature in features]
 
         if not api_key:
-            self.dataset.update_status("You need to provide a valid API key", is_final=True)
-            self.dataset.finish(0)
+            self.dataset.finish_with_error("You need to provide a valid API key")
+            return
+
+        # is there anything for us to download?
+        if self.source_dataset.num_rows == 0:
+            self.dataset.finish_with_error("No images to download.")
             return
 
         max_images = convert_to_int(self.parameters.get("amount", 0), 100)
         total = self.source_dataset.num_rows if not max_images else min(max_images, self.source_dataset.num_rows)
+        processed = 0
         done = 0
 
         for image_file in self.iterate_archive_contents(self.source_file):
             if self.interrupted:
                 raise ProcessorInterruptedException("Interrupted while fetching data from Google Vision API")
 
-            done += 1
             self.dataset.update_status("Annotating image %i/%i" % (done, total))
             self.dataset.update_progress(done / total)
 
-            if image_file.name.startswith("."):
+            if image_file.name.startswith(".") or image_file.suffix in (".json", ".log"):
                 self.dataset.log(f"Skipping file {image_file.name}, probably not an image.")
                 continue
 
@@ -119,6 +125,7 @@ class GoogleVisionAPIFetcher(BasicProcessor):
                 # cannot continue fetching, e.g. when API key is invalid
                 break
 
+            processed += 1
             if not annotations:
                 continue
 
@@ -126,11 +133,12 @@ class GoogleVisionAPIFetcher(BasicProcessor):
 
             with self.dataset.get_results_path().open("a", encoding="utf-8") as outfile:
                 outfile.write(json.dumps(annotations) + "\n")
+                done += 1
 
             if max_images and done >= max_images:
                 break
 
-        self.dataset.update_status("Annotations retrieved for %i images" % done)
+        self.dataset.update_status("Annotations retrieved for %i images (%i processed in total)" % (done, processed), is_final=True)
         self.dataset.finish(done)
 
     def annotate_image(self, image_file, api_key, features):
@@ -171,6 +179,7 @@ class GoogleVisionAPIFetcher(BasicProcessor):
 
         elif api_request.status_code != 200:
             self.dataset.update_status("Got response code %i from Google Vision API for image %s, skipping" % (api_request.status_code, image_file.name))
+            self.dataset.log(f"Code {api_request.status_code}; Text: {api_request.text}")
             return None
 
         try:

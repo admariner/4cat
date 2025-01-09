@@ -69,9 +69,9 @@ def check_for_nltk():
 	# NLTK
 	import nltk
 	try:
-		nltk.data.find('tokenizers/punkt')
+		nltk.data.find('tokenizers/punkt_tab')
 	except LookupError:
-		nltk.download('punkt', quiet=True)
+		nltk.download('punkt_tab', quiet=True)
 	try:
 		nltk.data.find('corpora/wordnet')
 	except LookupError:
@@ -79,8 +79,39 @@ def check_for_nltk():
 	
 	nltk.download("omw-1.4", quiet=True)
 
+def install_extensions(no_pip=True):
+	"""
+	Check for extensions and run any installation scripts found.
 
-def finish(args, logger):
+	Note: requirements texts are handled by setup.py
+	"""
+	# Check for extension packages
+	if os.path.isdir("extensions"):
+		for root, dirs, files in os.walk("extensions"):
+			for file in files:
+				if file == "fourcat_install.py":
+					command = [interpreter, os.path.join(root, file)]
+					if args.component == "frontend":
+						command.append("--component=frontend")
+					elif args.component == "backend":
+						command.append("--component=backend")
+					elif args.component == "both":
+						command.append("--component=both")
+
+					if no_pip:
+						command.append("--no-pip")
+
+					print(f"Installing extension: {os.path.join(root, file)}")
+					result = subprocess.run(command, stdout=subprocess.PIPE,
+											stderr=subprocess.PIPE)
+					if result.returncode != 0:
+						print("Error while running extension installation script: " + os.path.join(root, file))
+
+					print(result.stdout.decode("utf-8")) if result.stdout else None
+					print(result.stderr.decode("utf-8")) if result.stderr else None
+
+
+def finish(args, logger, no_pip=True):
 	"""
 	Finish migration
 
@@ -89,6 +120,7 @@ def finish(args, logger):
 	wrap up and exit.
 	"""
 	check_for_nltk()
+	install_extensions(no_pip=no_pip)
 	logger.info("\nMigration finished. You can now safely restart 4CAT.\n")
 
 	if args.restart:
@@ -115,7 +147,8 @@ cli.add_argument("--restart", "-x", default=False, action="store_true", help="Tr
 cli.add_argument("--no-migrate", "-m", default=False, action="store_true", help="Do not run scripts to upgrade between minor versions. Use if you only want to use migrate to e.g. upgrade dependencies.")
 cli.add_argument("--current-version", "-v", default="config/.current-version", help="File path to .current-version file, relative to the 4CAT root")
 cli.add_argument("--output", "-o", default="", help="By default migrate.py will send output to stdout. If this argument is set, it will write to the given path instead.")
-cli.add_argument("--component", "-c", default="both", help="Which component of 4CAT to migrate. Currently only skips check for if 4CAT is running when set to 'frontend'")
+cli.add_argument("--component", "-c", default="both", help="Which component of 4CAT to migrate ('both', 'backend', 'frontend'). Skips check for if 4CAT is running when set to 'frontend'. Also used by extensions w/ fourcat_install.py")
+cli.add_argument("--branch", "-b", default=False, help="Which branch to check out from GitHub. By default, check out the latest release.")
 args = cli.parse_args()
 
 print("")
@@ -124,10 +157,16 @@ if not cwd.glob("4cat-daemon.py"):
 	print("This script needs to be run from the same folder as 4cat-daemon.py\n")
 	exit(1)
 
+# track pip
+pip_ran = False
+
 # set up logging
 logger = logging.getLogger("migrate")
 logger.setLevel(logging.INFO)
 if args.output:
+	# Add both a file and a stream handler if output is set
+	handler = logging.StreamHandler(sys.stdout)
+	logger.addHandler(handler)
 	handler = logging.FileHandler(args.output)
 else:
 	handler = logging.StreamHandler(sys.stdout)
@@ -137,9 +176,11 @@ logger.info("           4CAT migration agent           ")
 logger.info("------------------------------------------")
 logger.info("Interactive:             " + ("yes" if not args.yes else "no"))
 logger.info("Pull latest release:     " + ("yes" if args.release else "no"))
+logger.info("Pull branch:             " + (args.branch if args.branch else "no"))
 logger.info("Restart after migration: " + ("yes" if args.restart else "no"))
 logger.info("Repository URL:          " + args.repository)
 logger.info(".current-version path:   " + args.current_version)
+logger.info(f"Current Datetime:        {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
 # ---------------------------------------------
 #    Ensure existence of current version file
@@ -158,6 +199,9 @@ if not current_version_file.exists():
 #      Try to stop 4CAT if it is running
 # ---------------------------------------------
 interpreter = sys.executable
+
+# this sleep is here to give anything automating migrate the chance to keep up
+time.sleep(2)
 
 logger.info("\nWARNING: Migration can take quite a while. 4CAT will not be available during migration.")
 logger.info("If 4CAT is still running, it will be shut down now (forcibly if necessary).")
@@ -191,30 +235,44 @@ migrate_to_run = []
 # ---------------------------------------------
 #          Check out latest release
 # ---------------------------------------------
-if args.release:
-	logger.info("- Finding latest release in remote git repository %s..." % args.repository)
-	repo_id = "/".join(args.repository.split("/")[-2:]).split(".git")[0]
+if args.release or args.branch:
+	logger.info("- Interfacing with git repository %s..." % args.repository)
+	if args.repository[:4] == "git@":
+		repo_id = "/".join(args.repository.split(":")[1].split("/")[-2:]).split(".git")[0]
+	else:
+		repo_id = "/".join(args.repository.split("/")[-2:]).split(".git")[0]
+
 	api_url = "https://api.github.com/repos/%s/releases/latest" % repo_id
 
-	try:
-		tag = requests.get(api_url, timeout=5).json()["tag_name"]
-		logger.info("  ...latest release is tagged %s." % tag)
-	except (requests.RequestException, json.JSONDecodeError, KeyError):
-		logger.info("Error while retrieving latest release tag via GitHub API. Check that the repository URL is correct.")
-		exit(1)
+	if args.release:
+		try:
+			tag = requests.get(api_url, timeout=5).json()["tag_name"]
+			logger.info("  ...latest release is tagged %s." % tag)
+		except (requests.RequestException, json.JSONDecodeError, KeyError):
+			logger.info("Error while retrieving latest release tag via GitHub API. Check that the repository URL is correct.")
+			exit(1)
 
-	tag_version = make_version_comparable(re.sub(r"^v", "", tag))
-	if tag_version <= current_version_c:
-		logger.info("  ...latest release available from GitHub (%s) is older than or equivalent to currently checked out version "
-			  "(%s)." % (tag_version, current_version_c))
-		logger.info("  ...upgrade not necessary, skipping.")
-		finish(args, logger)
+		tag_version = make_version_comparable(re.sub(r"^v", "", tag))
+		if tag_version <= current_version_c:
+			logger.info("  ...latest release available from GitHub (%s) is older than or equivalent to currently checked out version "
+				  "(%s)." % (tag_version, current_version_c))
+			logger.info("  ...upgrade not necessary, skipping.")
+			finish(args, logger, no_pip=pip_ran)
 
 	logger.info("  ...ensuring repository %s is a known remote" % args.repository)
 	remote = subprocess.run(shlex.split("git remote add 4cat_migrate %s" % args.repository), stdout=subprocess.PIPE,
 						stderr=subprocess.PIPE, cwd=cwd, text=True)
 	if remote.stderr:
-		if remote.stderr.strip() != "error: remote 4cat_migrate already exists.":
+		if remote.stderr.strip() == "error: remote 4cat_migrate already exists.":
+			# Update URL
+			remote = subprocess.run(shlex.split("git remote set-url 4cat_migrate %s" % args.repository),
+									stdout=subprocess.PIPE,
+									stderr=subprocess.PIPE, cwd=cwd, text=True)
+			if remote.stderr:
+				logger.info("Error while updating git remote for %s" % args.repository)
+				logger.info(remote.stderr)
+				exit(1)
+		else:
 			logger.info("Error while adding git remote for %s" % args.repository)
 			logger.info(remote.stderr)
 			exit(1)
@@ -223,18 +281,39 @@ if args.release:
 	fetch = subprocess.run(shlex.split("git fetch 4cat_migrate"), stderr=subprocess.PIPE, stdout=subprocess.PIPE, cwd=cwd, text=True)
 
 	if fetch.returncode != 0:
-		logger.info("Error while fetching latest tags with git. Check that the repository URL is correct.")
-		logger.info(fetch.stderr)
-		exit(1)
+		if "fatal: could not read Username" in fetch.stderr:
+			# git requiring login
+			from common.config_manager import config
+			if config.get("USING_DOCKER"):
+				# update git config setting
+				unset_authorization = subprocess.run(shlex.split("git config --unset http.https://github.com/.extraheader"), stderr=subprocess.PIPE, stdout=subprocess.PIPE, cwd=cwd, text=True)
+				fetch = subprocess.run(shlex.split("git fetch 4cat_migrate"), stderr=subprocess.PIPE,
+									   stdout=subprocess.PIPE, cwd=cwd, text=True)
+				if fetch.returncode != 0:
+					logger.info("Error while fetching latest tags with git. Check that the repository URL is correct.")
+					logger.info(fetch.stderr)
+					exit(1)
+		else:
+			logger.info("Error while fetching latest tags with git. Check that the repository URL is correct.")
+			logger.info(fetch.stderr)
+			exit(1)
 
-	logger.info("  ...checking out latest release")
-	tag_ref = shlex.quote("refs/tags/" + tag)
-	command = "git checkout --force %s" % tag_ref
+	if args.branch:
+		logger.info(f"  ...checking out branch '{args.branch}'")
+		command = f"git checkout --force 4cat_migrate/{args.branch}"
+	else:
+		logger.info("  ...checking out latest release")
+		tag_ref = shlex.quote("refs/tags/" + tag)
+		command = "git checkout --force %s" % tag_ref
+
 	result = subprocess.run(shlex.split(command), stdout=subprocess.PIPE,
 						stderr=subprocess.PIPE, cwd=cwd)
 
 	if result.returncode != 0:
-		logger.info("Error while pulling latest release with git. Check that the repository URL is correct.")
+		if args.branch:
+			logger.info("Error while pulling latest release with git. Check that the repository URL and branch name are correct.")
+		else:
+			logger.info("Error while pulling latest release with git. Check that the repository URL is correct.")
 		logger.info(result.stderr.decode("ascii"))
 		exit(1)
 
@@ -254,7 +333,7 @@ logger.info("- Code version: %s" % target_version)
 
 if current_version == target_version:
 	logger.info("  ...already up to date.")
-	finish(args, logger)
+	finish(args, logger, no_pip=pip_ran)
 
 if current_version_c[0:3] != target_version_c[0:3]:
 	logger.info("  ...cannot migrate between different major versions.")
@@ -287,20 +366,45 @@ else:
 		logger.info("  - %s" % file.name)
 
 # ---------------------------------------------
+#                    Install any needed packages
+# ---------------------------------------------
+
+try:
+	from common.config_manager import config
+except ImportError:
+	config = None
+
+if config and config.get("USING_DOCKER"):
+	logger.info("- Running in Docker environment, checking for and installing any needed compilers...")
+	# Pip needs some compilers to successfully update
+	needed_packages = ["g++", "gcc"]
+	try:
+		apt_get = subprocess.run(["apt-get", "install", "-y"] + needed_packages, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True)
+		logger.info("\n".join(["  " + line for line in apt_get.stdout.decode("utf-8").split("\n")]))
+	except subprocess.CalledProcessError as e:
+		logger.info("\n".join(["  " + line for line in e.output.decode("utf-8").split("\n")]))
+		logger.info(f"\n Error while installing {needed_packages}: {e}")
+
+# ---------------------------------------------
 #                    Run pip
 # ---------------------------------------------
-logger.info("- Running pip to install any new dependencies (this could take a moment)...")
-try:
-	pip = subprocess.run([interpreter, "-m", "pip", "install", "-r", "requirements.txt"],
-								stderr=subprocess.STDOUT, stdout=subprocess.PIPE, check=True, cwd=cwd)
-	for line in pip.stdout.decode("utf-8").split("\n"):
+def log_pip_output(logger, output):
+	for line in output.decode("utf-8").split("\n"):
 		if line.startswith("Requirement already satisfied:"):
 			# eliminate some noise in the output
 			continue
 		logger.info("  " + line)
+
+logger.info("- Running pip to install new dependencies and upgrade existing dependencies")
+logger.info("  (this could take a moment)...")
+try:
+	pip = subprocess.run([interpreter, "-m", "pip", "install", "-r", "requirements.txt", "--upgrade", "--upgrade-strategy", "eager"],
+								stderr=subprocess.STDOUT, stdout=subprocess.PIPE, check=True, cwd=cwd)
+	log_pip_output(logger, pip.stdout)
+	pip_ran = True
 except subprocess.CalledProcessError as e:
-	logger.info(e)
-	logger.info("\n  Error running pip. You may need to run this script with elevated privileges (e.g. sudo).\n")
+	log_pip_output(logger, e.output)
+	logger.info(f"\n Error running pip: {e}")
 	exit(1)
 logger.info("  ...done")
 
@@ -343,4 +447,4 @@ logger.info("  ...done")
 # ---------------------------------------------
 #            Done! Wrap up and finish
 # ---------------------------------------------
-finish(args, logger)
+finish(args, logger, no_pip=pip_ran)

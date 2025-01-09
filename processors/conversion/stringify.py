@@ -4,7 +4,7 @@ Collapse post bodies into one long string
 import re
 import string
 
-from backend.abstract.processor import BasicProcessor
+from backend.lib.processor import BasicProcessor
 from common.lib.helpers import UserInput
 
 __author__ = "Sal Hagen"
@@ -44,6 +44,16 @@ class Stringify(BasicProcessor):
 			"help": "Convert text to lowercase"
 		}
 	}
+
+	@staticmethod
+	def is_compatible_with(module=None, user=None):
+		"""
+        Determine compatibility; this processor is only compatible with top datasets in CSV or NDJSON format.
+
+        :param str module:  Module ID to determine compatibility with
+        :return bool:
+        """
+		return module.is_top_dataset() and module.get_extension() in ("csv", "ndjson")
 
 	def process(self):
 		"""

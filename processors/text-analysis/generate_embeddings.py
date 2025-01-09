@@ -10,7 +10,7 @@ from gensim.models.phrases import Phrases, Phraser
 from pathlib import Path
 
 from common.lib.helpers import UserInput, convert_to_int
-from backend.abstract.processor import BasicProcessor
+from backend.lib.processor import BasicProcessor
 from common.lib.exceptions import ProcessorInterruptedException
 
 __author__ = "Sal Hagen"
@@ -32,6 +32,8 @@ class GenerateWordEmbeddings(BasicProcessor):
 				  "e.g. exist of 100 numbers). These numeric word representations can be used to extract words with similar contexts. " \
 				  "Note that good models require a lot of data."  # description displayed in UI
 	extension = "zip"  # extension of result file, used internally and in UI
+
+	followups = ["similar-word2vec", "histwords-vectspace"]
 
 	references = [
 		"Word2Vec: [Mikolov, Tomas, Ilya Sutskever, Kai Chen, Greg Corrado, and Jeffrey Dean. 2013. “Distributed Representations of Words and Phrases and Their Compositionality.” 8Advances in Neural Information Processing Systems*, 2013: 3111-3119.](https://papers.nips.cc/paper/5021-distributed-representations-of-words-and-phrases-and-their-compositionality.pdf)",
@@ -103,11 +105,11 @@ class GenerateWordEmbeddings(BasicProcessor):
 	}
 
 	@classmethod
-	def is_compatible_with(cls, module=None):
+	def is_compatible_with(cls, module=None, user=None):
 		"""
 		Allow processor on token sets
 
-		:param module: Dataset or processor to determine compatibility with
+		:param module: Module to determine compatibility with
 		"""
 		return module.type == "tokenise-posts"
 

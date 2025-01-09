@@ -5,8 +5,7 @@ Make word clouds of columns with text and values
 
 from wordcloud import WordCloud
 
-import common.config_manager as config
-from backend.abstract.processor import BasicProcessor
+from backend.lib.processor import BasicProcessor
 from common.lib.helpers import UserInput
 
 __author__ = "Sal Hagen"
@@ -26,13 +25,13 @@ class MakeWordCloud(BasicProcessor):
 	extension = "svg"
 
 	@classmethod
-	def is_compatible_with(cls, module=None):
+	def is_compatible_with(cls, module=None, user=None):
 		"""
 		Allow processor on rankable items
 
 		:param module: Dataset or processor to determine compatibility with
 		"""
-		return module.type in ("tfidf", "collocations", "vector-ranker", "similar-word2vec", "topic-model-words", "extract-nouns", "get-entities")
+		return module.type in ("tfidf", "collocations", "vector-ranker", "vectorise-tokens-by-category", "similar-word2vec", "extract-nouns", "get-entities")
 
 	@classmethod
 	def get_options(self, parent_dataset=None, user=None):
@@ -48,12 +47,14 @@ class MakeWordCloud(BasicProcessor):
 				"word_column": {
 					"type": UserInput.OPTION_CHOICE,
 					"options": parent_columns,
-					"help": "Word column"
+					"help": "Word column",
+					"default": "item" if "item" in parent_columns else "",
 				},
 				"count_column": {
 					"type": UserInput.OPTION_CHOICE,
 					"options": parent_columns,
-					"help": "Count column"
+					"help": "Count column",
+					"default": "value" if "value" in parent_columns else "",
 				},
 				"to_lower": {
 					"type": UserInput.OPTION_TOGGLE,

@@ -10,7 +10,7 @@ import operator
 from nltk.collocations import *
 
 from common.lib.helpers import UserInput
-from backend.abstract.processor import BasicProcessor
+from backend.lib.processor import BasicProcessor
 
 class GetCollocations(BasicProcessor):
 	"""
@@ -22,12 +22,14 @@ class GetCollocations(BasicProcessor):
 	description = "Extracts words appearing close to each other from a set of tokens."  # description displayed in UI
 	extension = "csv"  # extension of result file, used internally and in UI
 
+	followups = ["preset-coword-network", "wordcloud"]
+
 	@classmethod
-	def is_compatible_with(cls, module=None):
+	def is_compatible_with(cls, module=None, user=None):
 		"""
 		Allow processor on token sets
 
-		:param module: Dataset or processor to determine compatibility with
+		:param module: Module to determine compatibility with
 		"""
 		return module.type == "tokenise-posts"
 

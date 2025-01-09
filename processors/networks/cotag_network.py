@@ -1,9 +1,8 @@
 """
 Generate co-tag network of co-occurring (hash)tags in items
 """
-import csv
 
-from backend.abstract.preset import ProcessorPreset
+from backend.lib.preset import ProcessorPreset
 from common.lib.helpers import UserInput
 
 __author__ = "Stijn Peeters"
@@ -30,23 +29,26 @@ class CoTaggerPreset(ProcessorPreset):
             "default": True,
             "help": "Convert tags to lowercase",
             "tooltip": "Merges tags with varying cases"
+        },
+        "ignore-tags": {
+            "type": UserInput.OPTION_TEXT,
+            "default": "",
+            "help": "Tags to ignore",
+            "tooltip": "Separate with commas if you want to ignore multiple tags. Do not include the '#' "
+                       "character."
         }
     }
 
     @classmethod
-    def is_compatible_with(cls, module=None):
+    def is_compatible_with(cls, module=None, user=None):
         """
         Allow processor on datasets containing a tags column
 
-        :param module: Dataset or processor to determine compatibility with
+        :param module: Module to determine compatibility with
         """
         usable_columns = {"tags", "hashtags", "groups"}
-
-        if module.is_dataset():
-            columns = module.get_columns()
-            return bool(set(columns) & usable_columns) if columns else False
-        else:
-            return False
+        columns = module.get_columns()
+        return bool(set(columns) & usable_columns) if columns else False
 
     def get_processor_pipeline(self):
         """
@@ -77,6 +79,7 @@ class CoTaggerPreset(ProcessorPreset):
                     "split-comma": True,
                     "categorise": True,
                     "allow-loops": False,
+                    "ignore-nodes": self.parameters.get("ignore-tags", ""),
                     "to-lowercase": self.parameters.get("to-lowercase", True)
                 }
             }

@@ -5,7 +5,7 @@ import string
 import jieba
 import re
 
-from backend.abstract.processor import BasicProcessor
+from backend.lib.processor import BasicProcessor
 from common.lib.helpers import UserInput, convert_to_int
 
 from nltk.tokenize import word_tokenize
@@ -38,71 +38,104 @@ class MakeWordtree(BasicProcessor):
 		"Wattenberg, M., & Viégas, F. B. (2008). The Word Tree, an Interactive Visual Concordance. IEEE Transactions on Visualization and Computer Graphics, 14(6), 1221–1228. <https://doi.org/10.1109/TVCG.2008.172>"
 	]
 
-	options = {
-		"query": {
-			"type": UserInput.OPTION_TEXT,
-			"default": "",
-			"help": "Word tree root query",
-			"tooltip": "Enter a word here to serve as the root of the word tree. The context of this query will be mapped in the tree visualisation. Cannot be empty or contain whitespace."
-		},
-		"limit": {
-			"type": UserInput.OPTION_TEXT,
-			"default": 3,
-			"min": 1,
-			"max": 25,
-			"help": "Max branches/level",
-			"tooltip": "Limit the amount of branches per level, sorted by most-occuring phrases. Range 1-25."
-		},
-		"window": {
-			"type": UserInput.OPTION_TEXT,
-			"min": 1,
-			"max": 10,
-			"default": 5,
-			"help": "Window size",
-			"tooltip": "Up to this many words before and/or after the queried phrase will be visualised"
-		},
-		"sides": {
-			"type": UserInput.OPTION_CHOICE,
-			"default": "right",
-			"options": {
-				"left": "Before query",
-				"right": "After query",
-				"both": "Before and after query"
+	@classmethod
+	def get_options(cls, parent_dataset=None, user=None):
+		"""
+		Get processor options
+		"""
+		options = {
+			"column": {
+				"type": UserInput.OPTION_TEXT,
+				"help": "Text column",
+				"default": "url",
+				"inline": True,
+				"tooltip": "Select the column containing the text from which to generate the word tree.",
 			},
-			"help": "Query context to visualise"
-		},
-		"align": {
-			"type": UserInput.OPTION_CHOICE,
-			"default": "middle",
-			"options": {
-				"middle": "Vertically centered",
-				"top": "Top",
+			"query": {
+				"type": UserInput.OPTION_TEXT,
+				"default": "",
+				"help": "Word tree root query",
+				"tooltip": "Enter a word here to serve as the root of the word tree. The context of this query will be mapped in the tree visualisation. Cannot be empty or contain whitespace."
 			},
-			"help": "Visual alignment"
-		},
-		"tokeniser_type": {
-			"type": UserInput.OPTION_CHOICE,
-			"default": "regular",
-			"options": {
-				"regular": "nltk word_tokenize",
-				"jieba-cut": "jieba (for Chinese text; accurate mode, recommended)",
-				"jieba-cut-all": "jieba (for Chinese text; full mode)",
-				"jieba-search": "jieba (for Chinese text; search engine suggestion style)",
+			"limit": {
+				"type": UserInput.OPTION_TEXT,
+				"default": 3,
+				"min": 1,
+				"max": 25,
+				"help": "Max branches/level",
+				"tooltip": "Limit the amount of branches per level, sorted by most-occuring phrases. Range 1-25."
 			},
-			"help": "Tokeniser",
-			"tooltip": "What heuristic to use to split up the text into separate words."
-		},
-		"strip-urls": {
-			"type": UserInput.OPTION_TOGGLE,
-			"default": True,
-			"help": "Remove URLs"
-		},
-		"strip-symbols": {
-			"type": UserInput.OPTION_TOGGLE,
-			"default": True,
-			"help": "Remove punctuation"
+			"window": {
+				"type": UserInput.OPTION_TEXT,
+				"min": 1,
+				"max": 10,
+				"default": 5,
+				"help": "Window size",
+				"tooltip": "Up to this many words before and/or after the queried phrase will be visualised"
+			},
+			"sides": {
+				"type": UserInput.OPTION_CHOICE,
+				"default": "right",
+				"options": {
+					"left": "Before query",
+					"right": "After query",
+					"both": "Before and after query"
+				},
+				"help": "Query context to visualise"
+			},
+			"align": {
+				"type": UserInput.OPTION_CHOICE,
+				"default": "middle",
+				"options": {
+					"middle": "Vertically centered",
+					"top": "Top",
+				},
+				"help": "Visual alignment"
+			},
+			"tokeniser_type": {
+				"type": UserInput.OPTION_CHOICE,
+				"default": "regular",
+				"options": {
+					"regular": "nltk word_tokenize",
+					"jieba-cut": "jieba (for Chinese text; accurate mode, recommended)",
+					"jieba-cut-all": "jieba (for Chinese text; full mode)",
+					"jieba-search": "jieba (for Chinese text; search engine suggestion style)",
+				},
+				"help": "Tokeniser",
+				"tooltip": "What heuristic to use to split up the text into separate words."
+			},
+			"strip-urls": {
+				"type": UserInput.OPTION_TOGGLE,
+				"default": True,
+				"help": "Remove URLs"
+			},
+			"strip-symbols": {
+				"type": UserInput.OPTION_TOGGLE,
+				"default": True,
+				"help": "Remove punctuation"
+			}
 		}
-	}
+
+		# Get the columns for the select columns option
+		if parent_dataset and parent_dataset.get_columns():
+			columns = parent_dataset.get_columns()
+			options["column"]["type"] = UserInput.OPTION_CHOICE
+			options["column"]["options"] = {v: v for v in columns}
+			options["column"]["default"] = "body" if "body" in columns else sorted(
+				columns,
+				key=lambda k: any([name in k for name in ["text", "subject", "description"]]), reverse=True).pop(0)
+
+		return options
+
+	@classmethod
+	def is_compatible_with(cls, module=None, user=None):
+		"""
+		Allow processor to run on all csv and NDJSON datasets
+
+		:param module: Dataset or processor to determine compatibility with
+		"""
+
+		return module.get_extension() in ("csv", "ndjson")
 
 	# determines how close the nodes are displayed to each other (min. 1)
 	whitespace = 2
@@ -136,6 +169,7 @@ class MakeWordtree(BasicProcessor):
 		delete_regex = re.compile(r"[^a-zA-Z)(.,\n -]")
 
 		# settings
+		column = self.parameters.get("column")
 		strip_urls = self.parameters.get("strip-urls")
 		strip_symbols = self.parameters.get("strip-symbols")
 		sides = self.parameters.get("sides")
@@ -177,7 +211,13 @@ class MakeWordtree(BasicProcessor):
 			processed += 1
 			if processed % 500 == 0:
 				self.dataset.update_status("Processing and tokenising post %i" % processed)
-			body = post["body"]
+			body = post.get(column)
+			
+			try:
+				body = str(body)
+			except TypeError:
+				continue
+
 			if not body:
 				continue
 
@@ -188,14 +228,18 @@ class MakeWordtree(BasicProcessor):
 				body = punkt_replace.sub("", body)
 
 			body = tokeniser(body, **tokeniser_args)
-			positions = [(i, x) for i, x in enumerate(body) if x.lower() == query.lower()]
+			if type(body) != list:
+				# Convert generator to list
+				body = list(body)
+
+			positions = [i for i, x in enumerate(body) if x.lower() == query.lower()]
 
 			# get lists of tokens for both the left and right side of the tree
 			# on the left side, all lists end with the query, on the right side,
 			# they start with the query
-			for position, body_tokens in positions:
-				right_branches.append(body_tokens[position:position + window])
-				left_branches.append(body_tokens[max(0, position - window):position + 1])
+			for position in positions:
+				right_branches.append(body[position:position + window])
+				left_branches.append(body[max(0, position - window):position + 1])
 
 		# Some settings for rendering the tree later
 		self.step = self.fontsize * 0.6  # approximately the width of a monospace char
@@ -215,7 +259,7 @@ class MakeWordtree(BasicProcessor):
 		tokens_right = []
 
 		# for each "level" (each branching point representing a level), turn
-		# tokens into nodes, record the max amount of occurences for any
+		# tokens into nodes, record the max amount of occurrences for any
 		# token in that level, and keep track of what nodes are in which level.
 		# The latter is needed because a token may occur multiple times, at
 		# different points in the graph. Do this for both the left and right
@@ -288,6 +332,8 @@ class MakeWordtree(BasicProcessor):
 
 			filtered_tokens_left.append(token)
 
+		self.dataset.log(f"Collected {len(filtered_tokens_left)} left tokens and {len(filtered_tokens_right)} right tokens")
+
 		# now we know which nodes are left, and can therefore determine how
 		# large the canvas needs to be - this is based on the max number of
 		# branches found on any level of the tree, in other words, the number
@@ -301,6 +347,7 @@ class MakeWordtree(BasicProcessor):
 				self.dataset.finish(0)
 				return None
 			elif sides == "both":
+				self.dataset.log("No data available to the left of the query")
 				sides = "right"
 				breadths_left = [0]
 
@@ -310,6 +357,7 @@ class MakeWordtree(BasicProcessor):
 				self.dataset.finish(0)
 				return None
 			elif sides == "both":
+				self.dataset.log("No data available to the right of the query")
 				sides = "left"
 				breadths_right = [0]
 
@@ -332,10 +380,12 @@ class MakeWordtree(BasicProcessor):
 
 		self.dataset.update_status("Rendering tree to SVG file")
 		if sides != "right":
+			self.dataset.update_status("Adding left side of tree to SVG file")
 			wrapper = self.render(wrapper, [token for token in filtered_tokens_left if token.is_root and token.children],
 								  height=height, side=self.SIDE_LEFT)
 
 		if sides != "left":
+			self.dataset.update_status("Adding right side of tree to SVG file")
 			wrapper = self.render(wrapper, [token for token in filtered_tokens_right if token.is_root and token.children],
 								  height=height, side=self.SIDE_RIGHT)
 

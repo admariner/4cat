@@ -4,7 +4,7 @@ Example post-processor worker
 import csv
 import re
 
-from backend.abstract.processor import BasicProcessor
+from backend.lib.processor import BasicProcessor
 
 __author__ = "Stijn Peeters"
 __credits__ = ["Stijn Peeters"]
@@ -23,16 +23,16 @@ class QuoteRanker(BasicProcessor):
 	description = "Sort posts by how often they were replied to by other posts in the dataset."  # description displayed in UI
 	extension = "csv"  # extension of result file, used internally and in UI
 
+	followups = []
+
 	@classmethod
-	def is_compatible_with(cls, module=None):
+	def is_compatible_with(cls, module=None, user=None):
 		"""
 		Allow processor on chan datasets
 
-		:param module: Dataset or processor to determine compatibility with
+		:param module: Module to determine compatibility with
 		"""
-		if module.is_dataset():
-			return module.parameters.get("datasource") in ("4chan", "8chan", "8kun")
-		return False
+		return module.parameters.get("datasource") in ("fourchan", "eightchan", "eightkun")
 
 
 	def process(self):

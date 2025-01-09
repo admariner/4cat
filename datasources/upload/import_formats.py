@@ -5,6 +5,7 @@ import re
 
 from dateutil.parser import parse as parse_datetime
 from common.lib.exceptions import ProcessorException
+from common.lib.helpers import convert_to_int
 
 
 class InvalidCustomFormat(ProcessorException):
@@ -88,7 +89,10 @@ def import_crowdtangle_facebook(reader, columns, dataset, parameters):
     overperforming_column = None
     for item in reader:
         hashtags = hashtag.findall(item["Message"])
-        date = datetime.datetime.strptime(" ".join(item["Post Created"].split(" ")[:2]), "%Y-%m-%d %H:%M:%S")
+        try:
+            date = datetime.datetime.strptime(" ".join(item["Post Created"].split(" ")[:2]), "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            yield InvalidImportedItem(reason=f"Cannot parse date/time '{item['Post Created']}'; skipping post")
 
         is_from_elsewhere = item["Link"].find("https://www.facebook.com/" + item["User Name"]) < 0
         shared_page = item["Link"].split("/")[3] if is_from_elsewhere and item["Link"].find(
@@ -118,7 +122,7 @@ def import_crowdtangle_facebook(reader, columns, dataset, parameters):
             "page_followers": item["Followers at Posting"],
             "page_shared_from": shared_page,
             "type": item["Type"],
-            "interactions": int(re.sub(r"[^0-9]", "", item["Total Interactions"])) if item[
+            "interactions": convert_to_int(re.sub(r"[^0-9]", "", item["Total Interactions"]), 0) if item[
                 "Total Interactions"] else 0,
             "comments": item["Comments"],
             "shares": item["Shares"],
@@ -203,7 +207,12 @@ def import_ytdt_videolist(reader, columns, dataset, parameters):
     """
     # write to the result file
     for item in reader:
-        date = datetime.datetime.strptime(item["publishedAt"], "%Y-%m-%dT%H:%M:%SZ")  # ex. 2022-11-11T05:30:01Z
+        try:
+            date = datetime.datetime.strptime(item["publishedAt"], "%Y-%m-%dT%H:%M:%SZ")  # ex. 2022-11-11T05:30:01Z
+        except ValueError:
+            yield InvalidImportedItem(reason=f"Invalid date ({item['publishedAt']})")
+            continue
+
         collection_date = "_".join(dataset.parameters.get("filename").split("_")[2:]).replace(".csv", "")
 
         item = {
@@ -275,7 +284,7 @@ def import_bzy_weibo(reader, columns, dataset, parameter):
             raise InvalidCustomFormat("CSV does not appear to be Bazhuayu format for Sina Weibo; please try importing again with CSV format set to \"Custom/other\".")
         raw_timestamp = item["from1"].strip()
         timestamp_bits = re.split(r"[年月日\s:]+", raw_timestamp)
-        print(timestamp_bits)
+
         if re.match(r"[0-9]{2}月[0-9]{2}日 [0-9]{2}:[0-9]{2}", raw_timestamp):
             timestamp = datetime.datetime(year, int(timestamp_bits[0]), int(timestamp_bits[1]), int(timestamp_bits[2]),
                                           int(timestamp_bits[3]))
@@ -317,6 +326,7 @@ def map_csv_items(reader, columns, dataset, parameters):
     """
     # write to the result file
     indexes = {}
+    now_timestmap = str(int(datetime.datetime.now().timestamp()))
     for row in reader:
         mapped_row = {}
         for field in columns:
@@ -328,6 +338,10 @@ def map_csv_items(reader, columns, dataset, parameters):
                         indexes[field] = 1
                     mapped_row[field] = indexes[field]
                     indexes[field] += 1
+                elif mapping == "__4cat_empty_value":
+                    mapped_row[field] = ""
+                elif mapping == "__4cat_now":
+                    mapped_row[field] = now_timestmap
                 else:
                     # actual mapping
                     mapped_row[field] = row[mapping]
@@ -337,7 +351,7 @@ def map_csv_items(reader, columns, dataset, parameters):
         # already exist! but it is necessary for 4CAT to handle the
         # data in processors etc and should be an equivalent value.
         try:
-            if mapped_row["timestamp"].isdecimal():
+            if mapped_row["timestamp"].replace(".", "").isdecimal() and mapped_row["timestamp"].count(".") <= 1:  # ignore . for floats
                 timestamp = datetime.datetime.fromtimestamp(float(mapped_row["timestamp"]))
             else:
                 timestamp = parse_datetime(mapped_row["timestamp"])
@@ -351,11 +365,11 @@ def map_csv_items(reader, columns, dataset, parameters):
                 if field not in mapped_row and field:
                     mapped_row[field] = value
 
-        except (ValueError, OSError, AttributeError):
+        except (ValueError, OSError, AttributeError) as e:
             # skip rows without a valid timestamp - this may happen
             # despite validation because only a sample is validated
             # this is an OSError on Windows sometimes???
-            yield InvalidImportedItem()
+            yield InvalidImportedItem(f"{e.__class__.__name__} - {e} (value was '{mapped_row['timestamp']}')")
             continue
 
         yield mapped_row
@@ -399,13 +413,13 @@ tools = {
         "name": "YouTube videos (via YouTube Data Tools' Video List module)",
         "columns": {"publishedAt", "videoId", "channelId", "channelTitle", "videoDescription"},
         "mapper": import_ytdt_videolist,
-        "csv_dialect": {"doublequote": True}
+        "csv_dialect": {"doublequote": True, "escapechar": "\\"},
     },
     "youtube_comment_list": {
         "name": "YouTube comments (via YouTube Data Tools' Video Info module)",
         "columns": {"id", "isReplyTo", "authorName", "text", "publishedAt"},
         "mapper": import_ytdt_commentlist,
-        "csv_dialect": {"doublequote": True}
+        "csv_dialect": {"doublequote": True, "escapechar": "\\"},
     },
     "bazhuayu_weibo": {
         "name": "Sina Weibo (via Bazhuayu)",

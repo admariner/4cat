@@ -3,12 +3,11 @@ Create topic clusters based on datasets
 """
 
 from common.lib.helpers import UserInput
-from backend.abstract.processor import BasicProcessor
+from backend.lib.processor import BasicProcessor
 from common.lib.exceptions import ProcessorInterruptedException
 
 import json, pickle
 import shutil
-import numpy as np
 
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 from sklearn.decomposition import LatentDirichletAllocation
@@ -30,6 +29,8 @@ class TopicModeler(BasicProcessor):
                   "For a given number of topics, tokens are assigned a relevance weight per topic, " \
                   "which can be used to find clusters of related words."  # description displayed in UI
     extension = "zip"  # extension of result file, used internally and in UI
+
+    followups = ["document_count", "document_topic_matrix", "topic-model-words"]
 
     options = {
         "vectoriser": {
@@ -74,11 +75,11 @@ class TopicModeler(BasicProcessor):
     ]
 
     @classmethod
-    def is_compatible_with(cls, module=None):
+    def is_compatible_with(cls, module=None, user=None):
         """
         Allow processor on token sets
 
-        :param module: Dataset or processor to determine compatibility with
+        :param module: Module to determine compatibility with
         """
         return module.type == "tokenise-posts"
 

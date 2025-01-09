@@ -4,7 +4,7 @@ Generate ranking per post attribute
 import colorsys
 import csv
 
-from backend.abstract.processor import BasicProcessor
+from backend.lib.processor import BasicProcessor
 from common.lib.helpers import UserInput, get_4cat_canvas
 from common.lib.exceptions import ProcessorInterruptedException
 
@@ -93,7 +93,7 @@ class RankFlowRenderer(BasicProcessor):
 			   [0.179, 1.0, 0.475], [0.108, 0.502, 0.914], [0.096, 1.0, 0.502], [0.123, 1.0, 0.69]]
 
 	@classmethod
-	def is_compatible_with(cls, module=None):
+	def is_compatible_with(cls, module=None, user=None):
 		"""
 		Allow processor on rankable items
 
@@ -154,7 +154,11 @@ class RankFlowRenderer(BasicProcessor):
 
 			if row["date"] not in items:
 				items[row["date"]] = {}
-			items[row["date"]][label] = weight
+
+			if label not in items[row["date"]]:
+				items[row["date"]][label] = weight
+			else:
+				items[row["date"]][label] += weight
 
 			max_weight = max(max_weight, weight)
 			max_item_length = max(max_item_length, len(row["date"]))
@@ -162,6 +166,10 @@ class RankFlowRenderer(BasicProcessor):
 		if not items:
 			return self.dataset.finish_with_error("No items remain after filtering. Try disabling 'Remove items that "
 												  "do not occur...'.")
+
+		# Sort labels by value; necessary if periods contain repeat labels (e.g. if seperated by category)
+		for period in items:
+			items[period] = dict(sorted(items[period].items(), key=lambda x: x[1], reverse=True))
 
 		# determine per-period changes
 		# this is used for determining what colour to give to nodes, and

@@ -4,7 +4,7 @@ Detect scenes in videos
 import json
 from scenedetect import open_video, SceneManager, VideoOpenFailure
 
-from backend.abstract.processor import BasicProcessor
+from backend.lib.processor import BasicProcessor
 from common.lib.exceptions import ProcessorInterruptedException, ProcessorException
 from common.lib.user_input import UserInput
 
@@ -27,6 +27,8 @@ class VideoSceneDetector(BasicProcessor):
 	description = "Detect distinct 'scenes' in videos based on various parameters (e.g. change in color and " \
 				  "intensity or cuts and fades to black) and extract the scene metadata."  # description displayed in UI
 	extension = "csv"  # extension of result file, used internally and in UI
+
+	followups = ["video-scene-frames", "video-timelines"]
 
 	references = [
 		"[PySceneDetect](https://github.com/Breakthrough/PySceneDetect)",
@@ -137,14 +139,12 @@ class VideoSceneDetector(BasicProcessor):
 		},
 	}
 
-	followups = ["video-scene-frames", "video-timelines"]
-
 	@classmethod
-	def is_compatible_with(cls, module=None):
+	def is_compatible_with(cls, module=None, user=None):
 		"""
 		Allow on videos
 		"""
-		return module.type.startswith("video-downloader")
+		return module.get_media_type() == "video" or module.type.startswith("video-downloader")
 
 	def process(self):
 		"""
@@ -237,7 +237,7 @@ class VideoSceneDetector(BasicProcessor):
 		rows = []
 		if video_metadata is None:
 			# Not good, but let's store the scenes and note the error
-			self.dataset.update_status("Error connecting video scenes to original dataset", is_final=True)
+			self.dataset.log("No metadata file found")
 
 			for filename, video_scenes in collected_scenes.items():
 				for i, scene in enumerate(video_scenes):
@@ -252,11 +252,12 @@ class VideoSceneDetector(BasicProcessor):
 				if video_data.get('success'):
 					files = video_data.get('files') if 'files' in video_data else [{"filename": video_data.get("filename"), "success":True}]
 					for file in files:
-						if not file.get("success"):
+						if not file.get("success") or file.get("filename") not in collected_scenes:
 							continue
+							
 						# List types are not super fun for CSV
 						if 'post_ids' in video_data:
-							video_data['post_ids'] = ','.join(video_data['post_ids'])
+							video_data['post_ids'] = ','.join([str(i) for i in video_data['post_ids']])
 
 						for i, scene in enumerate(collected_scenes[file.get('filename')]):
 							rows.append({

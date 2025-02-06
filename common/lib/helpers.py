@@ -1,29 +1,35 @@
 """
 Miscellaneous helper functions for the 4CAT backend
 """
-import ssl
 import subprocess
-from urllib.parse import urlparse
+import imagehash
+import hashlib
 import requests
 import datetime
 import smtplib
+import fnmatch
 import socket
+import shlex
 import copy
 import time
 import json
 import math
 import csv
+import ssl
 import re
 import os
 import io
 
-from collections.abc import MutableMapping
 from pathlib import Path
+from collections.abc import MutableMapping
 from html.parser import HTMLParser
+from urllib.parse import urlparse, urlunparse
 from calendar import monthrange
+from packaging import version
+from PIL import Image
 
 from common.lib.user_input import UserInput
-import common.config_manager as config
+from common.config_manager import config
 
 
 def init_datasource(database, logger, queue, name):
@@ -39,7 +45,6 @@ def init_datasource(database, logger, queue, name):
     :param string name:  ID of datasource that is being initialised
     """
     pass
-
 
 def strip_tags(html, convert_newlines=True):
     """
@@ -99,53 +104,131 @@ def sniff_encoding(file):
 
     return "utf-8-sig" if maybe_bom == b"\xef\xbb\xbf" else "utf-8"
 
-
-def get_software_version():
+def sniff_csv_dialect(csv_input):
     """
-    Get current 4CAT version
+    Determine CSV dialect for an input stream
 
-    Reads a given version file and returns the first string found in there
-    (up until the first space). On failure, return an empty string.
+    :param csv_input:  Input stream
+    :return tuple:  Tuple: Dialect object and a boolean representing whether
+    the CSV file seems to have a header
+    """
+    encoding = sniff_encoding(csv_input)
+    if type(csv_input) is io.TextIOWrapper:
+        wrapped_input = csv_input
+    else:
+        wrapped_input = io.TextIOWrapper(csv_input, encoding=encoding)
+    wrapped_input.seek(0)
+    sample = wrapped_input.read(1024 * 1024)
+    wrapped_input.seek(0)
+    has_header = csv.Sniffer().has_header(sample)
+    dialect = csv.Sniffer().sniff(sample, delimiters=(",", ";", "\t"))
+
+    return dialect, has_header
+
+
+def get_git_branch():
+    """
+    Get current git branch
+
+    If the 4CAT root folder is a git repository, this function will return the
+    name of the currently checked-out branch. If the folder is not a git
+    repository or git is not installed an empty string is returned.
+    """
+    try:
+        root_dir = str(config.get('PATH_ROOT').resolve())
+        branch = subprocess.run(shlex.split(f"git -C {shlex.quote(root_dir)} branch --show-current"), stdout=subprocess.PIPE)
+        if branch.returncode != 0:
+            raise ValueError()
+        return branch.stdout.decode("utf-8").strip()
+    except (subprocess.SubprocessError, ValueError, FileNotFoundError):
+        return ""
+
+
+def get_software_commit(worker=None):
+    """
+    Get current 4CAT git commit hash
+
+    Use `get_software_version()` instead if you need the release version
+    number rather than the precise commit hash.
 
     If no version file is available, run `git show` to test if there is a git
     repository in the 4CAT root folder, and if so, what commit is currently
     checked out in it.
 
-    :return str:  4CAT version
+    For extensions, get the repository information for that extension, or if
+    the extension is not a git repository, return empty data.
+
+    :param BasicWorker processor:  Worker to get commit for. If not given, get
+    version information for the main 4CAT installation.
+
+    :return tuple:  4CAT git commit hash, repository name
     """
-    versionpath = config.get('PATH_ROOT').joinpath(config.get('path.versionfile'))
+    # try git command line within the 4CAT root folder
+    # if it is a checked-out git repository, it will tell us the hash of
+    # the currently checked-out commit
 
-    if versionpath.exists() and not versionpath.is_file():
-        return ""
-
-    if not versionpath.exists():
-        # try github command line within the 4CAT root folder
-        # if it is a checked-out git repository, it will tell us the hash of
-        # the currently checked-out commit
-        try:
-            cwd = os.getcwd()
-            os.chdir(config.get('PATH_ROOT'))
-            show = subprocess.run(["git", "show"], stderr=subprocess.PIPE, stdout=subprocess.PIPE)
-            os.chdir(cwd)
-            if show.returncode != 0:
-                raise ValueError()
-            return show.stdout.decode("utf-8").split("\n")[0].split(" ")[1]
-        except (subprocess.SubprocessError, IndexError, TypeError, ValueError, FileNotFoundError):
-            return ""
-
+    # path has no Path.relative()...
+    relative_filepath = Path(re.sub(r"^[/\\]+", "", worker.filepath)).parent
     try:
-        with open(versionpath, "r", encoding="utf-8", errors="ignore") as versionfile:
-            version = versionfile.readline().split(" ")[0]
-            return version
-    except OSError:
+        # if extension, go to the extension file's path
+        # we will run git here - if it is not its own repository, we have no
+        # useful version info (since the extension is by definition not in the
+        # main 4CAT repository) and will return an empty value
+        if worker and worker.is_extension:
+            working_dir = str(config.get("PATH_ROOT").joinpath(relative_filepath).resolve())
+            # check if we are in the extensions' own repo or 4CAT's
+            git_cmd = f"git -C {shlex.quote(working_dir)} rev-parse --show-toplevel"
+            repo_level = subprocess.run(shlex.split(git_cmd), stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+            if Path(repo_level.stdout.decode("utf-8")) == config.get("PATH_ROOT"):
+                # not its own repository
+                return ("", "")
+
+        else:
+            working_dir = str(config.get("PATH_ROOT").resolve())
+
+        show = subprocess.run(shlex.split(f"git -C {shlex.quote(working_dir)} show"), stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        if show.returncode != 0:
+            raise ValueError()
+        commit = show.stdout.decode("utf-8").split("\n")[0].split(" ")[1]
+
+        # now get the repository the commit belongs to, if we can
+        origin = subprocess.run(shlex.split(f"git -C {shlex.quote(working_dir)} config --get remote.origin.url"), stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        if origin.returncode != 0 or not origin.stdout:
+            raise ValueError()
+        repository = origin.stdout.decode("utf-8").strip()
+        if repository.endswith(".git"):
+            repository = repository[:-4]
+
+    except (subprocess.SubprocessError, IndexError, TypeError, ValueError, FileNotFoundError) as e:
+        return ("", "")
+
+    return (commit, repository)
+
+def get_software_version():
+    """
+    Get current 4CAT version
+
+    This is the actual software version, i.e. not the commit hash (see
+    `get_software_hash()` for that). The current version is stored in a file
+    with a canonical location: if the file doesn't exist, an empty string is
+    returned.
+
+    :return str:  Software version, for example `1.37`.
+    """
+    current_version_file = config.get("PATH_ROOT").joinpath("config/.current-version")
+    if not current_version_file.exists():
         return ""
 
+    with current_version_file.open() as infile:
+        return infile.readline().strip()
 
-def get_github_version():
+def get_github_version(timeout=5):
     """
     Get latest release tag version from GitHub
 
     Will raise a ValueError if it cannot retrieve information from GitHub.
+
+    :param int timeout:  Timeout in seconds for HTTP request
 
     :return tuple:  Version, e.g. `1.26`, and release URL.
     """
@@ -156,7 +239,7 @@ def get_github_version():
     repo_id = re.sub(r"(\.git)?/?$", "", re.sub(r"^https?://(www\.)?github\.com/", "", repo_url))
 
     api_url = "https://api.github.com/repos/%s/releases/latest" % repo_id
-    response = requests.get(api_url, timeout=5)
+    response = requests.get(api_url, timeout=timeout)
     response = response.json()
     if response.get("message") == "Not Found":
         raise ValueError("Invalid GitHub URL or repository name")
@@ -166,6 +249,85 @@ def get_github_version():
         latest_tag = re.sub(r"^v", "", latest_tag)
 
     return (latest_tag, response.get("html_url"))
+
+def get_ffmpeg_version(ffmpeg_path):
+    """
+    Determine ffmpeg version
+
+    This can be necessary when using commands that change name between versions.
+
+    :param ffmpeg_path: ffmpeg executable path
+    :return packaging.version:  Comparable ersion
+    """
+    command = [ffmpeg_path, "-version"]
+    ffmpeg_version = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE)
+
+    ffmpeg_version = ffmpeg_version.stdout.decode("utf-8").split("\n")[0].strip().split(" version ")[1]
+    ffmpeg_version = re.split(r"[^0-9.]", ffmpeg_version)[0]
+
+    return version.parse(ffmpeg_version)
+
+
+def find_extensions():
+    """
+    Find 4CAT extensions and load their metadata
+
+    Looks for subfolders of the extension folder, and loads additional metadata
+    where available.
+
+    :return tuple:  A tuple with two items; the extensions, as an ID -> metadata
+    dictionary, and a list of (str) errors encountered while loading
+    """
+    extension_path = config.get("PATH_ROOT").joinpath("extensions")
+    errors = []
+    if not extension_path.exists() or not extension_path.is_dir():
+        return [], None
+
+    # each folder in the extensions folder is an extension
+    extensions = {
+        extension.name: {
+            "name": extension.name,
+            "version": "",
+            "url": "",
+            "git_url": "",
+            "is_git": False
+        } for extension in sorted(os.scandir(extension_path), key=lambda x: x.name) if extension.is_dir()
+    }
+
+    # collect metadata for extensions
+    allowed_metadata_keys = ("name", "version", "url")
+    for extension in extensions:
+        extension_folder = extension_path.joinpath(extension)
+        metadata_file = extension_folder.joinpath("metadata.json")
+        if metadata_file.exists():
+            with metadata_file.open() as infile:
+                try:
+                    metadata = json.load(infile)
+                    extensions[extension].update({k: metadata[k] for k in metadata if k in allowed_metadata_keys})
+                except (TypeError, ValueError) as e:
+                    errors.append(f"Error reading metadata file for extension '{extension}' ({e})")
+                    continue
+
+        extensions[extension]["is_git"] = extension_folder.joinpath(".git/HEAD").exists()
+        if extensions[extension]["is_git"]:
+            # try to get remote URL
+            try:
+                extension_root = str(extension_folder.resolve())
+                origin = subprocess.run(shlex.split(f"git -C {shlex.quote(extension_root)} config --get remote.origin.url"), stderr=subprocess.PIPE,
+                                        stdout=subprocess.PIPE)
+                if origin.returncode != 0 or not origin.stdout:
+                    raise ValueError()
+                repository = origin.stdout.decode("utf-8").strip()
+                if repository.endswith(".git") and "github.com" in repository:
+                    # use repo URL
+                    repository = repository[:-4]
+                extensions[extension]["git_url"] = repository
+            except (subprocess.SubprocessError, IndexError, TypeError, ValueError, FileNotFoundError) as e:
+                print(e)
+                pass
+
+    return extensions, errors
 
 
 def convert_to_int(value, default=0):
@@ -184,28 +346,6 @@ def convert_to_int(value, default=0):
         return int(value)
     except (ValueError, TypeError):
         return default
-
-
-def expand_short_number(text):
-    """
-    Expands a number descriptor like '300K' to an integer like '300000'
-
-    Wil raise a ValueError if the number cannot be converted
-
-    :param text: Number descriptor
-    :return int:  Number
-    """
-    try:
-        return int(text)
-    except ValueError:
-        number_bit = float(re.split(r"[^0-9.]", text)[0])
-        multiplier_bit = re.sub(r"[0-9.]", "", text).strip()
-        if multiplier_bit == "K":
-            return int(number_bit * 1000)
-        elif multiplier_bit == "M":
-            return int(number_bit * 1000000)
-        else:
-            raise ValueError("Unknown multiplier '%s' in number '%s'" % (multiplier_bit, text))
 
 
 def timify_long(number):
@@ -262,6 +402,54 @@ def timify_long(number):
 
     return time_str + last_str
 
+def andify(items):
+    """
+    Format a list of items for use in text
+
+    Returns a comma-separated list, the last item preceded by "and"
+
+    :param items:  Iterable list
+    :return str:  Formatted string
+    """
+    if len(items) == 0:
+        return ""
+    elif len(items) == 1:
+        return str(items[1])
+
+    result = f" and {items.pop()}"
+    return ", ".join([str(item) for item in items]) + result
+
+
+def hash_file(image_file, hash_type="file-hash"):
+    """
+    Generate an image hash
+
+    :param Path image_file:  Image file to hash
+    :param str hash_type:  Hash type, one of `file-hash`, `colorhash`,
+    `phash`, `average_hash`, `dhash`
+    :return str:  Hexadecimal hash value
+    """
+    if not image_file.exists():
+        raise FileNotFoundError()
+
+    if hash_type == "file-hash":
+        hasher = hashlib.sha1()
+
+        # Open the file in binary mode
+        with image_file.open("rb") as infile:
+            # Read and update hash in chunks to handle large files
+            while chunk := infile.read(1024):
+                hasher.update(chunk)
+
+        return hasher.hexdigest()
+
+    elif hash_type in ("colorhash", "phash", "average_hash", "dhash"):
+        image = Image.open(image_file)
+
+        return str(getattr(imagehash, hash_type)(image))
+
+    else:
+        raise NotImplementedError(f"Unknown hash type '{hash_type}'")
 
 def get_yt_compatible_ids(yt_ids):
     """
@@ -615,30 +803,67 @@ class NullAwareTextIOWrapper(io.TextIOWrapper):
     This can be used as a file reader that silently discards any null bytes it
     encounters.
     """
+
     def __next__(self):
         value = super().__next__()
         return remove_nuls(value)
 
+
+class HashCache:
+    """
+    Simple cache handler to cache hashed values
+
+    Avoids having to calculate a hash for values that have been hashed before
+    """
+
+    def __init__(self, hasher):
+        self.hash_cache = {}
+        self.hasher = hasher
+
+    def update_cache(self, value):
+        """
+        Checks the hash_cache to see if the value has been cached previously,
+        updates the hash_cache if needed, and returns the hashed value.
+        """
+        # value = str(value)
+        if value not in self.hash_cache:
+            author_hasher = self.hasher.copy()
+            author_hasher.update(str(value).encode("utf-8"))
+            self.hash_cache[value] = author_hasher.hexdigest()
+            del author_hasher
+        return self.hash_cache[value]
+
+
 def dict_search_and_update(item, keyword_matches, function):
     """
-    Apply a function to every item and sub item of a dictionary if the key contains one of the provided match terms.
+    Filter fields in an object recursively
 
-    Function loops through a dictionary or list and compares dictionary keys to the strings defined by keyword_matches.
-    It then applies the change_function to corresponding values.
+    Apply a function to every item and sub item of a dictionary if the key
+    contains one of the provided match terms.
 
-    Note: if a matching term is found, all nested values will have the function applied to them. e.g.,
-    all these values would be changed even those with not_key_match:
+    Function loops through a dictionary or list and compares dictionary keys to
+    the strings defined by keyword_matches. It then applies the change_function
+    to corresponding values.
+
+    Note: if a matching term is found, all nested values will have the function
+    applied to them. e.g., all these values would be changed even those with
+    not_key_match:
+
     {'key_match' : 'changed',
     'also_key_match' : {'not_key_match' : 'but_value_still_changed'},
     'another_key_match': ['this_is_changed', 'and_this', {'not_key_match' : 'even_this_is_changed'}]}
 
     This is a comprehensive (and expensive) approach to updating a dictionary.
-    IF a dictionary structure is known, a better solution would be to update using specific keys.
+    IF a dictionary structure is known, a better solution would be to update
+    using specific keys.
 
     :param Dict/List item:  dictionary/list/json to loop through
-    :param String keyword_matches:  list of strings that will be matched to dictionary keys
-    :param Function function:  function appled to all values of any items nested under a matching key
-    :return Dict/List: Copy of original item
+    :param String keyword_matches:  list of strings that will be matched to
+    dictionary keys. Can contain wildcards which are matched using fnmatch.
+    :param Function function:  function appled to all values of any items
+    nested under a matching key
+
+    :return Dict/List: Copy of original item, but filtered
     """
 
     def loop_helper_function(d_or_l, match_terms, change_function):
@@ -648,7 +873,7 @@ def dict_search_and_update(item, keyword_matches, function):
         if isinstance(d_or_l, dict):
             # Iterate through dictionary
             for key, value in iter(d_or_l.items()):
-                if match_terms == 'True' or any([match in key.lower() for match in match_terms]):
+                if match_terms == 'True' or any([fnmatch.fnmatch(key, match_term) for match_term in match_terms]):
                     # Match found; apply function to all items and sub-items
                     if isinstance(value, (list, dict)):
                         # Pass item through again with match_terms = True
@@ -726,7 +951,9 @@ def send_email(recipient, message):
     context = ssl.create_default_context()
 
     # Decide which connection type
-    with smtplib.SMTP_SSL(config.get('mail.server'), port=config.get('mail.port', 0), context=context) if config.get('mail.ssl') == 'ssl' else smtplib.SMTP(config.get('mail.server'), port=config.get('mail.port', 0)) as server:
+    with smtplib.SMTP_SSL(config.get('mail.server'), port=config.get('mail.port', 0), context=context) if config.get(
+            'mail.ssl') == 'ssl' else smtplib.SMTP(config.get('mail.server'),
+                                                   port=config.get('mail.port', 0)) as server:
         if config.get('mail.ssl') == 'tls':
             # smtplib.SMTP adds TLS context here
             server.starttls(context=context)
@@ -741,7 +968,6 @@ def send_email(recipient, message):
             server.sendmail(config.get('mail.noreply'), recipient, message)
         else:
             server.sendmail(config.get('mail.noreply'), recipient, message.as_string())
-
 
 
 def flatten_dict(d: MutableMapping, parent_key: str = '', sep: str = '.'):
@@ -780,7 +1006,8 @@ def sets_to_lists(d: MutableMapping):
     """
 
     def _check_list(l):
-        return [sets_to_lists(item) if isinstance(item, MutableMapping) else _check_list(item) if isinstance(item, (set,list)) else item for item in l]
+        return [sets_to_lists(item) if isinstance(item, MutableMapping) else _check_list(item) if isinstance(item, (
+        set, list)) else item for item in l]
 
     def _sets_to_lists_gen(d):
         for k, v in d.items():
@@ -794,16 +1021,87 @@ def sets_to_lists(d: MutableMapping):
     return dict(_sets_to_lists_gen(d))
 
 
-def validate_url(x):
+def url_to_hash(url, remove_scheme=True, remove_www=True):
     """
-    Checks that a string is a valid url. Uses urlparse from urllib.parse to check that there is both a proper scheme
-    and netloc (host) for the url.
+    Convert a URL to a filename; some URLs are too long to be used as filenames, this keeps the domain and hashes the
+    rest of the URL.
+    """
+    parsed_url = urlparse(url.lower())
+    if parsed_url:
+        if remove_scheme:
+            parsed_url = parsed_url._replace(scheme="")
+        if remove_www:
+            netloc = re.sub(r"^www\.", "", parsed_url.netloc)
+            parsed_url = parsed_url._replace(netloc=netloc)
 
-    :param str x:  string representing a url
-    :return bool:  True if string is valid url, False if not
-    """
-    if type(x) == str:
-        result = urlparse(x)
-        return all([result.scheme, result.netloc])
+        url = re.sub(r"[^0-9a-z]+", "_", urlunparse(parsed_url).strip("/"))
     else:
-        raise ValueError('Must provide type str not type %s' % type(x))
+        # Unable to parse URL; use regex
+        if remove_scheme:
+            url = re.sub(r"^https?://", "", url)
+        if remove_www:
+            if not remove_scheme:
+                scheme = re.match(r"^https?://", url).group()
+                temp_url = re.sub(r"^https?://", "", url)
+                url = scheme + re.sub(r"^www\.", "", temp_url)
+            else:
+                url = re.sub(r"^www\.", "", url)
+
+        url = re.sub(r"[^0-9a-z]+", "_", url.lower().strip("/"))
+
+    return hashlib.blake2b(url.encode("utf-8"), digest_size=24).hexdigest()
+
+
+def split_urls(url_string, allowed_schemes=None):
+    """
+    Split URL text by \n and commas.
+
+    4CAT allows users to input lists by either separating items with a newline or a comma. This function will split URLs
+    and also check for commas within URLs using schemes.
+
+    Note: some urls may contain scheme (e.g., https://web.archive.org/web/20250000000000*/http://economist.com);
+    this function will work so long as the inner scheme does not follow a comma (e.g., "http://,https://" would fail).
+    """
+    if allowed_schemes is None:
+        allowed_schemes = ('http://', 'https://', 'ftp://', 'ftps://')
+    potential_urls = []
+    # Split the text by \n
+    for line in url_string.split('\n'):
+        # Handle commas that may exist within URLs
+        parts = line.split(',')
+        recombined_url = ""
+        for part in parts:
+            if part.startswith(allowed_schemes):  # Other schemes exist
+                # New URL start detected
+                if recombined_url:
+                    # Already have a URL, add to list
+                    potential_urls.append(recombined_url)
+                # Start new URL
+                recombined_url = part
+            elif part:
+                if recombined_url:
+                    # Add to existing URL
+                    recombined_url += "," + part
+                else:
+                    # No existing URL, start new
+                    recombined_url = part
+            else:
+                # Ignore empty strings
+                pass
+        if recombined_url:
+            # Add any remaining URL
+            potential_urls.append(recombined_url)
+    return potential_urls
+
+
+def folder_size(path='.'):
+    """
+    Get the size of a folder using os.scandir for efficiency
+    """
+    total = 0
+    for entry in os.scandir(path):
+        if entry.is_file():
+            total += entry.stat().st_size
+        elif entry.is_dir():
+            total += folder_size(entry.path)
+    return total

@@ -1,7 +1,7 @@
 """
 Annotate top images
 """
-from backend.abstract.preset import ProcessorPreset
+from backend.lib.preset import ProcessorPreset
 
 from common.lib.helpers import UserInput, convert_to_int
 
@@ -56,6 +56,16 @@ class AnnotateImages(ProcessorPreset):
         }
     }
 
+    @staticmethod
+    def is_compatible_with(module=None, user=None):
+        """
+        Determine compatibility
+
+        :param Dataset module:  Module ID to determine compatibility with
+        :return bool:
+        """
+        return module.is_top_dataset() and module.get_extension() in ("csv", "ndjson")
+
     def get_processor_pipeline(self):
         """
         This queues a series of post-processors to annotate images
@@ -84,6 +94,7 @@ class AnnotateImages(ProcessorPreset):
                 "type": "image-downloader",
                 "parameters": {
                     "amount": amount,
+                    "columns": "item",
                     "overwrite": False
                 }
             },

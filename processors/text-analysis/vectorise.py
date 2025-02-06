@@ -5,7 +5,7 @@ import json
 import pickle
 import itertools
 
-from backend.abstract.processor import BasicProcessor
+from backend.lib.processor import BasicProcessor
 
 __author__ = "Stijn Peeters"
 __credits__ = ["Stijn Peeters"]
@@ -23,12 +23,14 @@ class Vectorise(BasicProcessor):
 				  "This is also known as a bag of words."  # description displayed in UI
 	extension = "zip"  # extension of result file, used internally and in UI
 
+	followups = ["vector-ranker"]
+
 	@classmethod
-	def is_compatible_with(cls, module=None):
+	def is_compatible_with(cls, module=None, user=None):
 		"""
 		Allow processor on token sets
 
-		:param module: Dataset or processor to determine compatibility with
+		:param module: Module to determine compatibility with
 		"""
 		return module.type == "tokenise-posts"
 

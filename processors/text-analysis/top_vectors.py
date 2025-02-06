@@ -6,7 +6,7 @@ import csv
 import json
 
 from common.lib.helpers import UserInput, convert_to_int
-from backend.abstract.processor import BasicProcessor
+from backend.lib.processor import BasicProcessor
 
 __author__ = "Stijn Peeters"
 __credits__ = ["Stijn Peeters"]
@@ -24,6 +24,8 @@ class VectorRanker(BasicProcessor):
 				  "Limited to 100 most-used tokens."  # description displayed in UI
 	extension = "csv"  # extension of result file, used internally and in UI
 
+	followups = ["wordcloud"]
+
 	options = {
 		"top": {
 			"type": UserInput.OPTION_TEXT,
@@ -40,11 +42,11 @@ class VectorRanker(BasicProcessor):
 	}
 
 	@classmethod
-	def is_compatible_with(cls, module=None):
+	def is_compatible_with(cls, module=None, user=None):
 		"""
 		Allow processor on token vectors
 
-		:param module: Dataset or processor to determine compatibility with
+		:param module: Module to determine compatibility with
 		"""
 		return module.type == "vectorise-tokens"
 

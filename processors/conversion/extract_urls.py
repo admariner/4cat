@@ -10,8 +10,8 @@ import requests
 from ural import urls_from_text
 
 from common.lib.exceptions import ProcessorInterruptedException
-from backend.abstract.processor import BasicProcessor
-from common.lib.helpers import UserInput
+from backend.lib.processor import BasicProcessor
+from common.lib.helpers import UserInput, split_urls
 
 __author__ = "Dale Wahl"
 __credits__ = ["Stijn Peeters", "Dale Wahl"]
@@ -190,11 +190,11 @@ class ExtractURLs(BasicProcessor):
     )
 
     @classmethod
-    def is_compatible_with(cls, module=None):
+    def is_compatible_with(cls, module=None, user=None):
         """
         All processor on CSV and NDJSON datasets
         """
-        return module.is_dataset() and module.get_extension() in ["csv", "ndjson"]
+        return module.get_extension() in ["csv", "ndjson"]
 
     @classmethod
     def get_options(cls, parent_dataset=None, user=None):
@@ -361,7 +361,7 @@ class ExtractURLs(BasicProcessor):
         :return list:  	            list of identified URLs
         """
         if split_comma:
-            texts = text.split(",")
+            texts = split_urls(text)
         else:
             texts = [text]
 

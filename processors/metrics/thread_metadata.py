@@ -5,9 +5,8 @@ import datetime
 import math
 import time
 
-from backend.abstract.processor import BasicProcessor
+from backend.lib.processor import BasicProcessor
 
-import common.config_manager as config
 __author__ = "Sal Hagen"
 __credits__ = ["Sal Hagen"]
 __maintainer__ = "Sal Hagen"
@@ -20,8 +19,21 @@ class ThreadMetadata(BasicProcessor):
 	type = "thread-metadata"  # job type ID
 	category = "Post metrics"  # category
 	title = "Thread metadata"  # title displayed in UI
-	description = "Extract various metadata on the threads in the dataset, including time data and post counts. Note that this extracted only on the basis of the posts present this dataset."  # description displayed in UI
+	description = "Extract various metadata on the threads in the dataset, including time data and post counts. Note " \
+				  "that this extracted only on the basis of the items present this dataset."  # description displayed in UI
 	extension = "csv"  # extension of result file, used internally and in UI
+
+	followups = []
+
+	@staticmethod
+	def is_compatible_with(module=None, user=None):
+		"""
+        Determine compatibility
+
+        :param Dataset module:  Module ID to determine compatibility with
+        :return bool:
+        """
+		return module.is_top_dataset() and module.get_extension() in ("csv", "ndjson")
 
 	def process(self):
 		"""
@@ -32,6 +44,7 @@ class ThreadMetadata(BasicProcessor):
 		threads = {}
 
 		self.dataset.update_status("Reading source file")
+		progress = 0
 		for post in self.source_dataset.iterate_items(self):
 			if post["thread_id"] not in threads:
 				threads[post["thread_id"]] = {
@@ -64,6 +77,12 @@ class ThreadMetadata(BasicProcessor):
 			threads[post["thread_id"]]["last_post"] = max(timestamp, threads[post["thread_id"]]["last_post"])
 			threads[post["thread_id"]]["count"] += 1
 
+			progress += 1
+			if progress % 500 == 0:
+				self.dataset.update_status(f"Iterated through {progress:,} of {self.source_dataset.num_rows:,} items")
+				self.dataset.update_progress(progress / self.source_dataset.num_rows)
+
+
 		results = [{
 			"thread_id": thread_id,
 			"timestamp": datetime.datetime.utcfromtimestamp(threads[thread_id]["first_post"]).strftime(
@@ -83,7 +102,7 @@ class ThreadMetadata(BasicProcessor):
 					"num_images": threads[thread_id]["images"],
 					"image_md5": threads[thread_id]["image_md5"],
 					"country_code": threads[thread_id]["country_code"],
-				} if self.source_dataset.type in ("4chan", "8chan", "8kun") else {}
+				} if self.source_dataset.type in ("fourchan", "eightchan", "eightkun") else {}
 			)
 		} for thread_id in threads]
 

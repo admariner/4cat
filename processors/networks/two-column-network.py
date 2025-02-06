@@ -3,7 +3,7 @@ Generate network of values from two columns
 """
 from dateutil.relativedelta import relativedelta
 
-from backend.abstract.processor import BasicProcessor
+from backend.lib.processor import BasicProcessor
 from common.lib.helpers import UserInput, get_interval_descriptor
 
 import networkx as nx
@@ -84,6 +84,12 @@ class ColumnNetworker(BasicProcessor):
             "default": False,
             "help": "Convert values to lowercase",
             "tooltip": "Merges values with varying cases"
+        },
+        "ignore-nodes": {
+            "type": UserInput.OPTION_TEXT,
+            "default": "",
+            "help": "Nodes to ignore",
+            "tooltip": "Separate with commas if you want to ignore multiple nodes"
         }
     }
 
@@ -123,13 +129,12 @@ class ColumnNetworker(BasicProcessor):
         return options
 
     @classmethod
-    def is_compatible_with(cls, module=None):
+    def is_compatible_with(cls, module=None, user=None):
         """
         Allow processor to run on all csv and NDJSON datasets
 
-        :param module: Dataset or processor to determine compatibility with
+        :param module: Module to determine compatibility with
         """
-
         return module.get_extension() in ("csv", "ndjson")
 
     def process(self):
@@ -146,6 +151,7 @@ class ColumnNetworker(BasicProcessor):
         allow_loops = self.parameters.get("allow-loops")
         interval_type = self.parameters.get("interval")
         to_lower = self.parameters.get("to-lowercase", False)
+        ignoreable = [n.strip() for n in self.parameters.get("ignore-nodes", "").split(",") if n.strip()]
 
         processed = 0
 
@@ -161,7 +167,7 @@ class ColumnNetworker(BasicProcessor):
 
             processed += 1
             if processed % 500 == 0:
-                self.dataset.update_status("Processed %i items (%i nodes found)" % (processed, len(network.nodes)))
+                self.dataset.update_status(f"Processed {processed:,} items ({len(network.nodes):,} nodes found)")
                 self.dataset.update_progress(processed / self.source_dataset.num_rows)
 
             # both columns need to have a value for an edge to be possible
@@ -193,6 +199,14 @@ class ColumnNetworker(BasicProcessor):
             if split_comma:
                 values_a = [value.strip() for value_groups in values_a for value in value_groups.split(",")]
                 values_b = [value.strip() for value_groups in values_b for value in value_groups.split(",")]
+
+            if ignoreable:
+                values_a = [v for v in values_a if v not in ignoreable]
+                values_b = [v for v in values_b if v not in ignoreable]
+
+            # only proceed if we actually have any edges left
+            if not values_a or not values_b:
+                continue
 
             try:
                 interval = get_interval_descriptor(item, interval_type)
@@ -253,9 +267,10 @@ class ColumnNetworker(BasicProcessor):
 
                         edge = (node_a, node_b)
                         if edge not in network.edges():
-                            network.add_edge(node_a, node_b, frequency=1)
+                            network.add_edge(node_a, node_b, frequency=1, weight=1)
                         else:
                             network.edges[edge]['frequency'] += 1
+                            network.edges[edge]['weight'] += 1
 
         if not network.edges():
             self.dataset.update_status("No edges could be created for the given parameters", is_final=True)

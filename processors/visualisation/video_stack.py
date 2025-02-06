@@ -9,12 +9,15 @@ assumes that ffprobe is also present in the same location.
 import shutil
 import subprocess
 import shlex
+import re
 
-import common.config_manager as config
+from packaging import version
 
-from backend.abstract.processor import BasicProcessor
+from common.config_manager import config
+from backend.lib.processor import BasicProcessor
 from common.lib.exceptions import ProcessorInterruptedException
 from common.lib.user_input import UserInput
+from common.lib.helpers import get_ffmpeg_version
 
 __author__ = "Stijn Peeters"
 __credits__ = ["Stijn Peeters"]
@@ -33,10 +36,17 @@ class VideoStack(BasicProcessor):
     title = "Stack videos"  # title displayed in UI
     description = "Create a video stack from the videos in the dataset. Videos are layered on top of each other " \
                   "transparently to help visualise similarities. Does not work well with more than a dozen or so " \
-                  "videos."  # description displayed in UI
+                  "videos. Videos are stacked by length, i.e. the longest video is at the 'bottom' of the stack."  # description displayed in UI
     extension = "mp4"  # extension of result file, used internally and in UI
 
     options = {
+        "amount": {
+            "type": UserInput.OPTION_TEXT,
+            "help": f"Number of videos to stack.",
+            "default": 10,
+            "max": 50,
+            "min": 2,
+        },
         "transparency": {
             "type": UserInput.OPTION_TEXT,
             "coerce_tye": float,
@@ -45,7 +55,7 @@ class VideoStack(BasicProcessor):
             "max": 1,
             "help": "Layer transparency",
             "tooltip": "Transparency of each layer in the stack, between 0 (opaque) and 1 (fully transparent). "
-                       "As a rule of thumb, for 10 videos use 90% opacity (0.10), for 20 use 80% (0.80), and so on."
+                       "As a rule of thumb, for 10 videos use 90% opacity (0.10), for 20 use 80% (0.20), and so on."
         },
         "eof-action": {
             "type": UserInput.OPTION_CHOICE,
@@ -65,26 +75,28 @@ class VideoStack(BasicProcessor):
             "options": {
                 "longest": "Use audio from longest video in stack",
                 "none": "Remove audio"
-            }
+            },
+            "default": "longest"
         }
     }
 
     @classmethod
-    def is_compatible_with(cls, module=None):
+    def is_compatible_with(cls, module=None, user=None):
         """
         Determine compatibility
 
-        :param str module:  Module ID to determine compatibility with
+        :param DataSet module:  Module ID to determine compatibility with
         :return bool:
         """
-        if module.is_dataset() and module.num_rows > 50:
-            # this processor doesn't work well with large datasets
+        if not (module.get_media_type() == "video" or module.type.startswith("video-downloader")):
             return False
-
-        return module.type.startswith("video-downloader") and \
-               config.get("video_downloader.ffmpeg-path") and \
-               shutil.which(config.get("video_downloader.ffmpeg-path"))
-
+        else:
+            # Only check these if we have a video dataset
+            # also need ffprobe to determine video lengths
+            # is usually installed in same place as ffmpeg
+            ffmpeg_path = shutil.which(config.get("video-downloader.ffmpeg_path", user=user))
+            ffprobe_path = shutil.which("ffprobe".join(ffmpeg_path.rsplit("ffmpeg", 1))) if ffmpeg_path else None
+            return ffmpeg_path and ffprobe_path
 
     def process(self):
         """
@@ -100,29 +112,32 @@ class VideoStack(BasicProcessor):
         # Collect parameters
         eof = self.parameters.get("eof-action")
         sound = self.parameters.get("audio")
+        amount = self.parameters.get("amount")
 
         # To figure out the length of a video we use ffprobe, if available
         with_errors = False
-        ffmpeg_path = shutil.which(config.get("video_downloader.ffmpeg-path"))
+        ffmpeg_path = shutil.which(config.get("video-downloader.ffmpeg_path"))
         ffprobe_path = shutil.which("ffprobe".join(ffmpeg_path.rsplit("ffmpeg", 1)))
-        if not ffprobe_path and sound == "longest":
-            with_errors = True
-            self.dataset.log("Could not find ffprobe which is needed to determine the length of videos. Cannot use the "
-                             "audio of the longest video in the stack; omitting audio from stack video instead.")
-            sound = "none"
-
 
         # unpack source videos to stack
-        video_dataset = self.source_dataset.nearest("video-downloader*")
+        video_dataset = None
+        for video_dataset_type in ["video-downloader*", "media-import-search"]:
+            if video_dataset is None:
+                video_dataset = self.source_dataset.nearest(video_dataset_type)
         if not video_dataset:
             self.log.error(
                 f"Trying to extract video data from non-video dataset {video_dataset.key} (type '{video_dataset.type}')")
             return self.dataset.finish_with_error("Video data missing. Cannot stack videos.")
 
-        # two separate staging areas:
-        # one to store the videos we're reading from
-        # one to store the frames we're capturing
-        video_staging_area = video_dataset.get_staging_area()
+        # a staging area to store the videos we're reading from
+        video_staging_area = self.dataset.get_staging_area()
+
+        # determine ffmpeg version
+        # -fps_mode is not in older versions and we can use -vsync instead
+        # but -vsync will be deprecated so only use it if needed
+        # todo: periodically check if we still need to support ffmpeg < 5.1
+        # at the time of writing, 4.* is still distributed with various OSes
+        fps_params = ["-fps_mode", "vfr"] if get_ffmpeg_version(ffmpeg_path) >= version.parse("5.1") else ["-vsync", "vfr"]
 
         # command to stack input videos
         transparency_filter = []
@@ -134,58 +149,80 @@ class VideoStack(BasicProcessor):
         except ValueError:
             transparency = 0.3
 
-        num_videos = self.source_dataset.num_rows - 1  # minus 1, because .metadata.json
+        max_videos = min(amount, self.source_dataset.num_rows - 1)  # minus 1, because .metadata.json
         lengths = {}
+        videos = []
 
+        # unpack videos and determine length of the video (for sorting)
         for video in self.iterate_archive_contents(video_dataset.get_results_path(), staging_area=video_staging_area,
                                                    immediately_delete=False):
             if self.interrupted:
                 shutil.rmtree(video_staging_area, ignore_errors=True)
-                return ProcessorInterruptedException("Interrupted while stacking videos")
+                return ProcessorInterruptedException("Interrupted while unpacking videos")
 
             # skip JSON
             if video.name == '.metadata.json':
                 continue
 
+            if len(videos) >= max_videos:
+                break
+
             video_path = shlex.quote(str(video))
 
             # determine length if needed
-            if sound == "longest" and ffprobe_path:
-                length_command = [ffprobe_path, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_path]
-                length = subprocess.run(length_command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE)
+            length_command = [ffprobe_path, "-v", "error", "-show_entries", "format=duration", "-of",
+                              "default=noprint_wrappers=1:nokey=1", video_path]
+            length = subprocess.run(length_command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE)
 
-                length_output = length.stdout.decode("utf-8")
-                length_error = length.stderr.decode("utf-8")
-                if length_error:
-                    with_errors = True
-                    self.dataset.log("Cannot determine length of video {video.name}. Cannot use the audio of the "
-                                     "longest video in the stack; omitting audio from stack video instead.")
-                    sound = "none"
-                else:
-                    lengths[index] = float(length_output)
+            length_output = length.stdout.decode("utf-8")
+            length_error = length.stderr.decode("utf-8")
+            if length_error:
+                shutil.rmtree(video_staging_area, ignore_errors=True)
+                return self.dataset.finish_with_error("Cannot determine length of video {video.name}. Cannot stack "
+                                                      "videos without knowing the video lengths.")
+            else:
+                lengths[video.name] = float(length_output)
 
+            videos.append(video)
 
+        # sort videos by length
+        videos = sorted(videos, key=lambda v: lengths[v.name], reverse=True)
+        num_videos = len(videos)
+        self.dataset.log(f"Collected {num_videos} videos to stack")
+
+        # loop again, this time to construct the ffmpeg command
+        last_index = num_videos - 1
+        for video in videos:
+            video_path = shlex.quote(str(video))
             # video to stack
             command += ["-i", video_path]
             if index > 0:
                 # 'bottom' video doesn't need transparency since there's nothing below it
-                transparency_filter.append(f"[{index}]format=yuva444p,colorchannelmixer=aa={transparency}[output{index}]")
+                transparency_filter.append(
+                    f"[{index}]format=yuva444p,colorchannelmixer=aa={transparency}[output{index}]")
 
             overlay = f"overlay=eof_action={eof}"
-            if 0 < index < num_videos:
-                # do this for all but the first one (see below) and the last
-                # one (nothing is stacked on top of the last one)
-                if index == num_videos - 1:
-                    merge_filter.append(f"[stage{index}][output{index + 1}]{overlay}[final]")
-                else:
-                    merge_filter.append(f"[stage{index}][output{index + 1}]{overlay}[stage{index + 1}]")
-            elif index == 0:
+            if index == 0:
+                # first video overlays second video (i.e. the second video w/ transparency filter applied as output1)
                 merge_filter.append(f"[0][output1]{overlay}[stage1]")
+            elif 0 < index < last_index:
+                # each consecutive video overlays the following
+                # do this for all but the first one (see above) and the last
+                # one (nothing is stacked on top of the last one)
+                if index < last_index - 1:
+                    merge_filter.append(f"[stage{index}][output{index + 1}]{overlay}[stage{index + 1}]")
+                else:
+                    # second to last video overlays last video and marks merge filter as final
+                    merge_filter.append(f"[stage{index}][output{index + 1}]{overlay}[final]")
+            else:
+                # last video has no additional overlay
+                pass
 
             index += 1
-            self.dataset.update_status(f"Unpacked {index:,} of {self.source_dataset.num_rows:,} videos")
+            self.dataset.update_status(f"Unpacked {index:,} of {num_videos:,} videos")
 
+        # create final complex filter chain
         ffmpeg_filter = shlex.quote(";".join(transparency_filter) + ";" + ";".join(merge_filter))[1:-1]
         command += ["-filter_complex", ffmpeg_filter]
 
@@ -193,11 +230,9 @@ class VideoStack(BasicProcessor):
         if sound == "none":
             command += ["-an"]
         elif sound == "longest":
-            longest_index = sorted(lengths, key=lambda k: lengths[k], reverse=True)[0]
-            command += ["-map", f"{longest_index}:a"]
+            command += ["-map", f"0:a"]
 
-        command += ["-map", "[final]"]
-
+        command += ["-map", "[final]", *fps_params]
 
         # output file
         command.append(shlex.quote(str(self.dataset.get_results_path())))

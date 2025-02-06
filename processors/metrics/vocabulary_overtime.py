@@ -3,12 +3,10 @@ Over-time trends
 """
 import re
 
-from pathlib import Path
-
-from backend.abstract.processor import BasicProcessor
+from backend.lib.processor import BasicProcessor
 from common.lib.helpers import UserInput, get_interval_descriptor
+from common.config_manager import config
 
-import common.config_manager as config
 __author__ = "Stijn Peeters"
 __credits__ = ["Stijn Peeters"]
 __maintainer__ = "Stijn Peeters"
@@ -24,6 +22,8 @@ class OvertimeAnalysis(BasicProcessor):
 	title = "Over-time word counts"  # title displayed in UI
 	description = "Determines the counts over time of particular set of words or phrases."  # description displayed in UI
 	extension = "csv"  # extension of result file, used internally and in UI
+
+	followups = []
 
 	references = [
 		"[Hatebase.org](https://hatebase.org)"
@@ -74,6 +74,16 @@ class OvertimeAnalysis(BasicProcessor):
 			"help": "Custom vocabulary (separate with commas)"
 		}
 	}
+
+	@staticmethod
+	def is_compatible_with(module=None, user=None):
+		"""
+        Determine compatibility
+
+        :param Dataset module:  Module ID to determine compatibility with
+        :return bool:
+        """
+		return module.is_top_dataset() and module.get_extension() in ("csv", "ndjson")
 
 	def process(self):
 		"""
@@ -138,7 +148,7 @@ class OvertimeAnalysis(BasicProcessor):
 				post["body"] = ""
 				
 			if processed % 2500 == 0:
-				self.dataset.update_status("Processed %i posts" % processed)
+				self.dataset.update_status(f"Processed {processed:,} items")
 				self.dataset.update_progress(processed / self.source_dataset.num_rows)
 				
 			# if 'partition' is false, there will just be one combined

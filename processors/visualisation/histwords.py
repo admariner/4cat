@@ -11,7 +11,7 @@ from sklearn.decomposition import PCA, TruncatedSVD
 
 from gensim.models import KeyedVectors
 
-from backend.abstract.processor import BasicProcessor
+from backend.lib.processor import BasicProcessor
 from common.lib.helpers import UserInput, convert_to_int, get_4cat_canvas
 from common.lib.exceptions import ProcessorInterruptedException
 
@@ -94,7 +94,7 @@ class HistWordsVectorSpaceVisualiser(BasicProcessor):
     }
 
     @classmethod
-    def is_compatible_with(cls, module=None):
+    def is_compatible_with(cls, module=None, user=None):
         """
         Allow processor on token sets
 
@@ -243,6 +243,7 @@ class HistWordsVectorSpaceVisualiser(BasicProcessor):
                 vectors = tsne.fit_transform(vectors)
             except ValueError:
                 self.dataset.finish_with_error("Insufficient data to reduce to 2D. The word embeddings model may be too small to visualise properly.")
+                return
         elif reduction_method == "TruncatedSVD":
             # standard sklearn parameters made explicit
             svd = TruncatedSVD(n_components=2, algorithm="randomized", n_iter=5, random_state=0)

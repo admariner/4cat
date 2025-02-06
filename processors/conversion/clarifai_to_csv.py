@@ -3,8 +3,7 @@ Convert Clarifai annotations to CSV
 """
 import csv
 
-from backend.abstract.processor import BasicProcessor
-from common.lib.exceptions import ProcessorInterruptedException
+from backend.lib.processor import BasicProcessor
 
 __author__ = "Stijn Peeters"
 __credits__ = ["Stijn Peeters"]
@@ -22,18 +21,18 @@ class ConvertClarifaiOutputToCSV(BasicProcessor):
     NDJSON, but it can be more useful to have a CSV file. This discards some
     information to allow 'flattening' the output to a simple CSV file.
     """
-    type = "convert-vision-to-csv"  # job type ID
+    type = "convert-clarifai-vision-to-csv"  # job type ID
     category = "Conversion"  # category
     title = "Convert Clarifai results to CSV"  # title displayed in UI
     description = "Convert the Clarifai API output to a simplified CSV file."  # description displayed in UI
     extension = "csv"  # extension of result file, used internally and in UI
 
     @classmethod
-    def is_compatible_with(cls, module=None):
+    def is_compatible_with(cls, module=None, user=None):
         """
-        Determine if processor is compatible with dataset
+        Determine if processor is compatible
 
-        :param module: Dataset or processor to determine compatibility with
+        :param module: Module determine compatibility with
         """
         return module.type == "clarifai-api"
 

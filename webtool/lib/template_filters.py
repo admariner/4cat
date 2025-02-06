@@ -1,25 +1,37 @@
+import urllib.parse
 import datetime
-import markdown
+from math import floor
+
 import json
-import time
+import ural
 import uuid
 import math
 import os
 import re
 import requests
 
-from pathlib import Path
 from urllib.parse import urlencode, urlparse
-from webtool import app, db
+from webtool import app, config
+from webtool.lib.helpers import parse_markdown
 from common.lib.helpers import timify_long
+from common.config_manager import ConfigWrapper
 
+from flask import request
 from flask_login import current_user
-
-import common.config_manager as config
 
 @app.template_filter('datetime')
 def _jinja2_filter_datetime(date, fmt=None, wrap=True):
-	date = datetime.datetime.utcfromtimestamp(date)
+	if isinstance(date, str):
+		try:
+			date = int(date)
+		except ValueError:
+			return date
+
+	try:
+		date = datetime.datetime.utcfromtimestamp(date)
+	except (ValueError, OverflowError):
+		return date
+
 	format = "%d %b %Y" if not fmt else fmt
 	formatted = date.strftime(format)
 
@@ -59,7 +71,7 @@ def _jinja2_filter_commafy(number):
 	return f"{number:,}"
 
 @app.template_filter('timify')
-def _jinja2_filter_numberify(number):
+def _jinja2_filter_timify(number):
 	try:
 		number = int(number)
 	except TypeError:
@@ -93,6 +105,13 @@ def _jinja2_filter_timify_long(number):
 	"""
 	return timify_long(number)
 
+@app.template_filter("fromjson")
+def _jinja2_filter_fromjson(data):
+	try:
+		return json.loads(data)
+	except TypeError:
+		return data
+
 @app.template_filter("http_query")
 def _jinja2_filter_httpquery(data):
 	data = {key: data[key] for key in data if data[key]}
@@ -102,10 +121,52 @@ def _jinja2_filter_httpquery(data):
 	except TypeError:
 		return ""
 
-@app.template_filter('markdown')
-def _jinja2_filter_markdown(text):
-	val = markdown.markdown(text)
-	return val
+@app.template_filter("add_colour")
+def _jinja2_add_colours(data):
+	"""
+	Add colour preview to hexadecimal colour values.
+
+	Cute little preview for #FF0099-like strings. Used (at time of writing) for
+	Pinterest data, which has a "dominant colour" field.
+
+	Only works on strings that are *just* the value, to avoid messing up HTML
+	etc
+
+	:param str data:  String
+	:return str:  HTML
+	"""
+	if type(data) is not str or not re.match(r"#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})\b", data):
+		return data
+
+	return f'<span class="colour-preview"><i style="background:{data}" aria-hidden="true"></i> {data}</span>'
+
+@app.template_filter("add_ahref")
+def _jinja2_filter_add_ahref(content, ellipsiate=0):
+	"""
+	Add HTML links to text
+
+	Replaces URLs with a clickable link
+
+	:param str content:  Text to parse
+	:return str:  Parsed text
+	"""
+	try:
+		content = str(content)
+	except ValueError:
+		return content
+
+	for link in set(ural.urls_from_text(str(content))):
+		if ellipsiate > 0:
+			link_text = _jinja2_filter_ellipsiate(link, ellipsiate, True, "[&hellip;]")
+		else:
+			link_text = link
+		content = content.replace(link, f'<a href="{link.replace("<", "%3C").replace(">", "%3E").replace(chr(34), "%22")}" rel="external">{link_text}</a>')
+
+	return content
+
+@app.template_filter('markdown',)
+def _jinja2_filter_markdown(text, trim_container=False):
+	return parse_markdown(text, trim_container)
 
 @app.template_filter('isbool')
 def _jinja2_filter_isbool(value):
@@ -119,7 +180,7 @@ def _jinja2_filter_json(data):
 @app.template_filter('config_override')
 def _jinja2_filter_conf(data, property=""):
 	try:
-		return config.get("flask." + property)
+		return config.get("flask." + property, user=current_user)
 	except AttributeError:
 		return data
 
@@ -159,6 +220,30 @@ def _jinja2_filter_extension_to_noun(ext):
 		return "file"
 	else:
 		return "item"
+
+@app.template_filter("ellipsiate")
+def _jinja2_filter_ellipsiate(text, length, inside=False, ellipsis_str="&hellip;"):
+	if len(text) <= length:
+		return text
+
+	elif not inside:
+		return text[:length] + ellipsis_str
+
+	else:
+		# two cases: URLs and normal text
+		# for URLs, try to only ellipsiate after the domain name
+		# this makes the URLs easier to read when shortened
+		if ural.is_url(text):
+			pre_part = "/".join(text.split("/")[:3])
+			if len(pre_part) < length - 6:  # kind of arbitrary
+				before = len(pre_part) + 1
+			else:
+				before = floor(length / 2)
+		else:
+			before = floor(length / 2)
+
+		after = len(text) - before
+		return text[:before] + ellipsis_str + text[after:]
 
 @app.template_filter('4chan_image')
 def _jinja2_filter_4chan_image(image_4chan, post_id, board, image_md5):
@@ -225,12 +310,12 @@ def _jinja2_filter_post_field(field, post):
 	formatted_field = field
 
 	field = str(field)
-	
+
 	for key in re.findall(r"\{\{(.*?)\}\}", field):
 
 		original_key = key
 
-		# Remove possible slice stings so we get the original key
+		# Remove possible slice strings so we get the original key
 		string_slice = None
 		if "[" in original_key and "]" in original_key:
 			string_slice = re.search(r"\[(.*?)\]", original_key)
@@ -259,7 +344,7 @@ def _jinja2_filter_post_field(field, post):
 		# We see 0 as a valid value - e.g. '0 retweets'.
 		if not val and val != 0:
 			return ""
-		
+
 		# Support some basic string slicing
 		if string_slice:
 			field = field.replace("[" + string_slice + "]", "")
@@ -280,7 +365,7 @@ def _jinja2_filter_post_field(field, post):
 
 		# Apply further filters, if present (e.g. lower)
 		for extra_filter in extra_filters:
-			
+
 			extra_filter = extra_filter.strip()
 
 			# We're going to parse possible parameters to pass to the filter
@@ -291,11 +376,15 @@ def _jinja2_filter_post_field(field, post):
 				extra_filter = extra_filter.split("(")[0]
 				params = [p.strip() for p in params.split(",")]
 				params = [post[param] for param in params]
-			
+
 			val = app.jinja_env.filters[extra_filter](val, *params)
 
 		if string_slice:
 			val = val[string_slice]
+
+		# Extract single list item
+		if isinstance(val, list) and len(val) == 1:
+			val = val[0]
 
 		formatted_field = formatted_field.replace("{{" + original_key + "}}", str(val))
 
@@ -328,16 +417,26 @@ def inject_now():
 		"""
 		return str(uuid.uuid4())
 
-	notifications = current_user.get_notifications()
+	wrapped_config = ConfigWrapper(config, user=current_user, request=request)
+
+	cv_path = wrapped_config.get("PATH_ROOT").joinpath("config/.current-version")
+	if cv_path.exists():
+		with cv_path.open() as infile:
+			version = infile.readline().strip()
+	else:
+		version = "???"
+
 
 	return {
-		"__datasources_config": config.get('4cat.datasources'),
-		"__has_https": config.get("flask.https"),
+		"__has_https": wrapped_config.get("flask.https"),
 		"__datenow": datetime.datetime.utcnow(),
-		"__tool_name": config.get("4cat.name"),
-		"__tool_name_long": config.get("4cat.name_long"),
-		"__notifications": notifications,
-		"__expire_datasets": config.get("expire.timeout"),
-		"__expire_optout": config.get("expire.allow_optout"),
+		"__notifications": current_user.get_notifications(),
+		"__user_config": lambda setting: wrapped_config.get(setting),
+		"__user_cp_access": any([wrapped_config.get(p) for p in config.config_definition.keys() if p.startswith("privileges.admin")]),
+		"__version": version,
 		"uniqid": uniqid
 	}
+
+@app.template_filter('log')
+def _jinja2_filter_log(text):
+	app.logger.info(text)

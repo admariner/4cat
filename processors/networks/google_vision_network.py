@@ -1,7 +1,7 @@
 """
 Google Vision API co-label network
 """
-from backend.abstract.processor import BasicProcessor
+from backend.lib.processor import BasicProcessor
 from common.lib.helpers import UserInput
 from common.lib.exceptions import ProcessorInterruptedException
 
@@ -50,11 +50,11 @@ class VisionTagNetworker(BasicProcessor):
     }
 
     @classmethod
-    def is_compatible_with(cls, module=None):
+    def is_compatible_with(cls, module=None, user=None):
         """
         Allow processor to run on Google Vision API data
 
-        :param module: Dataset or processor to determine compatibility with
+        :param module: Module to determine compatibility with
         """
         return module.type == "google-vision-api"
 
@@ -71,6 +71,10 @@ class VisionTagNetworker(BasicProcessor):
             min_confidence = float(self.parameters.get("min_confidence", 0))
         except ValueError:
             min_confidence = 0
+
+        if self.source_dataset.num_rows == 0 or not self.source_dataset.get_results_path().exists():
+            self.dataset.finish_with_error(f"No results found from Google Vision API. Check Google Vision results and logs.")
+            return
 
         for annotations in self.source_dataset.iterate_items(self):
             file_annotations = {}

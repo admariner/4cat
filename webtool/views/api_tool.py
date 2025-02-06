@@ -1,37 +1,36 @@
 """
 4CAT Tool API - To be used to queue and check datasets
 """
-
-import importlib
+import itertools
 import hashlib
 import psutil
-import common.config_manager as config
 import json
 import time
 import csv
 import os
-import re
 
 from pathlib import Path
 
-import backend
-
 from flask import jsonify, request, render_template, render_template_string, redirect, send_file, url_for, flash, \
-	get_flashed_messages
+	get_flashed_messages, send_from_directory
 from flask_login import login_required, current_user
 from werkzeug.utils import secure_filename
 
-from webtool import app, db, log, openapi, limiter, queue
-from webtool.lib.helpers import error
+from webtool import app, db, log, openapi, limiter, queue, config, fourcat_modules
+from webtool.lib.helpers import error, setting_required, parse_markdown
 
-from common.lib.exceptions import QueryParametersException, JobNotFoundException, QueryNeedsExplicitConfirmationException, QueryNeedsFurtherInputException
+from common.lib.exceptions import QueryParametersException, JobNotFoundException, \
+	QueryNeedsExplicitConfirmationException, QueryNeedsFurtherInputException, DataSetException
 from common.lib.queue import JobQueue
 from common.lib.job import Job
+from common.config_manager import ConfigWrapper
 from common.lib.dataset import DataSet
-from common.lib.helpers import UserInput, call_api
-from backend.abstract.worker import BasicWorker
+from common.lib.helpers import UserInput, call_api, get_software_version
+from common.lib.user import User
+from backend.lib.worker import BasicWorker
 
 api_ratelimit = limiter.shared_limit("3 per second", scope="api")
+config = ConfigWrapper(config, user=current_user, request=request)
 
 API_SUCCESS = 200
 API_FAIL = 404
@@ -107,6 +106,7 @@ def api_status():
 
 @app.route("/api/datasource-form/<string:datasource_id>/")
 @login_required
+@setting_required("privileges.can_create_dataset")
 def datasource_form(datasource_id):
 	"""
 	Get data source query form HTML
@@ -125,20 +125,19 @@ def datasource_form(datasource_id):
 
 	:param datasource_id:  Data source ID, as specified in the data source and
 						   config.py
-	:return: A JSON object with the `html` of the template,
-	         a boolean `has_javascript` determining whether javascript should be
-	         loaded for this template, a `status` code and the `datasource` ID.
+	:return: A JSON object with the `html` of the template, a `status` code and
+	the `datasource` ID.
 
 	:return-error 404: If the datasource does not exist.
 	"""
-	if datasource_id not in backend.all_modules.datasources:
+	if datasource_id not in fourcat_modules.datasources:
 		return error(404, message="Datasource '%s' does not exist" % datasource_id)
 
-	if datasource_id not in config.get('4cat.datasources'):
+	if datasource_id not in config.get('datasources.enabled'):
 		return error(404, message="Datasource '%s' does not exist" % datasource_id)
 
-	datasource = backend.all_modules.datasources[datasource_id]
-	worker_class = backend.all_modules.workers.get(datasource_id + "-search")
+	datasource = fourcat_modules.datasources[datasource_id]
+	worker_class = fourcat_modules.workers.get(datasource_id + "-search")
 
 	if not worker_class:
 		return error(404, message="Datasource '%s' has no search worker" % datasource_id)
@@ -159,56 +158,22 @@ def datasource_form(datasource_id):
 	if status:
 		labels.append(status)
 
-	form = render_template("create-dataset-option.html", options=worker_options, labels=labels)
-	javascript_path = datasource["path"].joinpath("webtool", "tool.js")
-	has_javascript = javascript_path.exists()
-
+	form = render_template("components/create-dataset-option.html", options=worker_options, labels=labels)
 	html = render_template_string(form, datasource_id=datasource_id, datasource=datasource)
 
 	return jsonify({
 		"status": "success",
 		"datasource": datasource_id,
-		"has_javascript": has_javascript,
 		"type": labels,
 		"html": html
 	})
-
-
-@app.route("/api/datasource-script/<string:datasource_id>/")
-@login_required
-def datasource_script(datasource_id):
-	"""
-	Get data source query form HTML
-
-	The data source needs to have been loaded as a module with a
-	`ModuleCollector`, and also needs to be present in `config.py`. If so, this
-	endpoint returns the data source's tool javascript file, if it exists as
-	`tool.js` in the data source's `webtool` folder.
-
-	:param datasource_id:  Datasource ID, as specified in the datasource and
-						   config.py
-	:return: A javascript file
-	:return-error 404: If the datasource does not exist.
-	"""
-	if datasource_id not in backend.all_modules.datasources:
-		return error(404, message="Datasource '%s' does not exist" % datasource_id)
-
-	if datasource_id not in config.get('4cat.datasources'):
-		return error(404, message="Datasource '%s' does not exist" % datasource_id)
-
-	datasource = backend.all_modules.datasources[datasource_id]
-	script_path = datasource["path"].joinpath("webtool", "tool.js")
-
-	if not script_path.exists():
-		return error(404, message="Datasource '%s' does not exist" % datasource_id)
-
-	return send_file(str(script_path))
 
 
 @app.route("/api/import-dataset/", methods=["POST"])
 @login_required
 @limiter.limit("5 per minute")
 @openapi.endpoint("tool")
+@setting_required("privileges.can_create_dataset")
 def import_dataset():
 	"""
 	Import a dataset from another tool via upload
@@ -236,13 +201,21 @@ def import_dataset():
 	}
 	"""
 	platform = request.headers.get("X-Zeeschuimer-Platform").split(".")[0]
-	if not platform or platform not in backend.all_modules.datasources:
-		return error(404, message="Unknown platform or source format")
+	pseudonymise_mode = request.args.get("pseudonymise", "none")
+
+	# data source identifiers cannot start with a number but some do (such as
+	# 9gag and 4chan) so sanitise those numbers to account for this...
+	platform = platform.replace("1", "one").replace("2", "two").replace("3", "three").replace("4", "four") \
+		.replace("5", "five").replace("6", "six").replace("7", "seven").replace("8", "eight") \
+		.replace("9", "nine")
+
+	if not platform or platform not in fourcat_modules.datasources or platform not in config.get('datasources.enabled'):
+		return error(404, message=f"Unknown platform or source format '{platform}'")
 
 	worker_types = (f"{platform}-import", f"{platform}-search")
 	worker = None
 	for worker_type in worker_types:
-		worker = backend.all_modules.workers.get(worker_type)
+		worker = fourcat_modules.workers.get(worker_type)
 		if worker:
 			break
 
@@ -254,9 +227,23 @@ def import_dataset():
 		type=worker.type,
 		db=db,
 		owner=current_user.get_id(),
-		extension=worker.extension
+		extension=worker.extension,
+		modules=fourcat_modules
 	)
 	dataset.update_status("Importing uploaded file...")
+
+	# if indicated that pseudonymisation is needed, immediately queue the
+	# relevant worker so that it will pseudonymise the dataset before anything
+	# else can be done with it
+	if pseudonymise_mode in ("pseudonymise", "anonymise"):
+		filterable_fields = worker.pseudonymise_fields if hasattr(worker, "pseudonymise_fields") else ["author*", "user*"]
+		dataset.next = [{
+			"type": "author-info-remover",
+			"parameters": {
+				"mode": pseudonymise_mode,
+				"fields": filterable_fields
+			}
+		}]
 
 	# store the file at the result path for the dataset, but with a different suffix
 	# since the dataset was only just created, this file is guaranteed to not exist yet
@@ -284,6 +271,7 @@ def import_dataset():
 
 @app.route("/api/queue-query/", methods=["POST"])
 @login_required
+@setting_required("privileges.can_create_dataset")
 @limiter.limit("5 per minute")
 @openapi.endpoint("tool")
 def queue_dataset():
@@ -294,13 +282,6 @@ def queue_dataset():
 	Request parameters vary by data source. The ones mandated constitute the
 	minimum but more may be required.
 
-	:request-param str board:  Board ID to query
-	:request-param str datasource:  Data source ID to query
-	:request-param str body_match:  String to match in the post body
-	:request-param str subject_match:  String to match in the post subject
-    :request-param int min_date:  Timestamp marking the beginning of the match
-                                  period
-    :request-param int max_date:  Timestamp marking the end of the match period
     :request-param str ?access_token:  Access token; only required if not
                                        logged in currently.
 
@@ -308,15 +289,16 @@ def queue_dataset():
 	              status and results.
 	:return-error 404: If the datasource does not exist.
 	"""
+
 	datasource_id = request.form.get("datasource", "")
-	if datasource_id not in backend.all_modules.datasources:
+	if datasource_id not in fourcat_modules.datasources:
 		return error(404, message="Datasource '%s' does not exist" % datasource_id)
 
 	search_worker_id = datasource_id + "-search"
-	if search_worker_id not in backend.all_modules.workers:
+	if search_worker_id not in fourcat_modules.workers:
 		return error(404, message="Datasource '%s' has no search interface" % datasource_id)
 
-	search_worker = backend.all_modules.workers[search_worker_id]
+	search_worker = fourcat_modules.workers[search_worker_id]
 
 	# handle confirmation outside of parameter parsing, since it is not data
 	# source specific
@@ -327,7 +309,7 @@ def queue_dataset():
 		# just in case
 		try:
 			# first sanitise values
-			sanitised_query = UserInput.parse_all(search_worker.get_options(None, current_user), request.form.to_dict(), silently_correct=False)
+			sanitised_query = UserInput.parse_all(search_worker.get_options(None, current_user), request.form, silently_correct=False)
 
 			# then validate for this particular datasource
 			sanitised_query = {"frontend-confirm": has_confirm, **sanitised_query}
@@ -337,7 +319,7 @@ def queue_dataset():
 			# ask the user for more input by returning a HTML snippet
 			# containing form fields to be added to the form before it is
 			# re-submitted
-			form = render_template("create-dataset-option.html", options=e.config)
+			form = render_template("components/create-dataset-option.html", options=e.config)
 			return jsonify({"status": "extra-form", "html": form})
 
 		except QueryParametersException as e:
@@ -363,19 +345,32 @@ def queue_dataset():
 	sanitised_query["datasource"] = datasource_id
 	sanitised_query["type"] = search_worker_id
 
+	if request.form.to_dict().get("pseudonymise") in ("pseudonymise", "anonymise"):
+		sanitised_query["pseudonymise"] = request.form.to_dict().get("pseudonymise")
+
+	if request.form.to_dict().get("email-complete", False):
+		sanitised_query["email-complete"] = request.form.to_dict().get("email-user", False)
+
 	# unchecked checkboxes do not send data in html forms, so key will not exist if box is left unchecked
-	sanitised_query["pseudonymise"] = bool(request.form.to_dict().get("pseudonymise", False))
 	is_private = bool(request.form.get("make-private", False))
 
 	extension = search_worker.extension if hasattr(search_worker, "extension") else "csv"
+
 	dataset = DataSet(
 		parameters=sanitised_query,
 		db=db,
 		type=search_worker_id,
 		extension=extension,
 		is_private=is_private,
-		owner=current_user.get_id()
+		owner=current_user.get_id(),
+		modules=fourcat_modules
 	)
+
+	# this bit allows search workers to insist on the new dataset having a
+	# certain key. This is at the time of writing only used by the worker that
+	# imports 4CAT datasets from elsewhere
+	if hasattr(search_worker, "ensure_key"):
+		dataset.set_key(search_worker.ensure_key(sanitised_query))
 
 	if request.form.get("label"):
 		dataset.update_label(request.form.get("label"))
@@ -383,13 +378,15 @@ def queue_dataset():
 	if hasattr(search_worker, "after_create"):
 		search_worker.after_create(sanitised_query, dataset, request)
 
-	queue.add_job(jobtype=search_worker_id, remote_id=dataset.key)
-	dataset.link_job(Job.get_by_remote_ID(dataset.key, db))
+	queue.add_job(jobtype=search_worker_id, remote_id=dataset.key, interval=0)
+	new_job = Job.get_by_remote_ID(dataset.key, db)
+	dataset.link_job(new_job)
 
 	return jsonify({"status": "success", "message": "", "key": dataset.key})
 
 
 @app.route('/api/check-query/')
+@setting_required("privileges.can_create_dataset")
 @openapi.endpoint("tool")
 def check_dataset():
 	"""
@@ -423,8 +420,8 @@ def check_dataset():
 	block = request.args.get("block", "status")
 
 	try:
-		dataset = DataSet(key=dataset_key, db=db)
-	except TypeError:
+		dataset = DataSet(key=dataset_key, db=db, modules=fourcat_modules)
+	except DataSetException:
 		return error(404, error="Dataset does not exist.")
 
 	if not current_user.can_access_dataset(dataset):
@@ -443,11 +440,11 @@ def check_dataset():
 	else:
 		path = ""
 
-	template = "result-status.html" if block == "status" else "result-result-row.html"
+	template = "components/result-status.html" if block == "status" else "components/result-result-row.html"
 
 	status = {
 		"datasource": dataset.parameters.get("datasource"),
-		"status": dataset.get_status(),
+		"status": parse_markdown(dataset.get_status(), trim_container=True),
 		"status_html": render_template(template, dataset=dataset),
 		"label": dataset.get_label(),
 		"rows": dataset.data["num_rows"],
@@ -493,11 +490,11 @@ def edit_dataset_label(key):
 	label = request.form.get("label", "")
 
 	try:
-		dataset = DataSet(key=dataset_key, db=db)
-	except TypeError:
+		dataset = DataSet(key=dataset_key, db=db, modules=fourcat_modules)
+	except DataSetException:
 		return error(404, error="Dataset does not exist.")
 
-	if not current_user.is_admin and not current_user.get_id() == dataset.owner:
+	if not config.get("privileges.admin.can_manipulate_all_datasets") and not dataset.is_accessible_by(current_user, "owner"):
 		return error(403, message="Not allowed")
 
 	dataset.update_label(label)
@@ -538,8 +535,8 @@ def convert_dataset(key):
 	datasource = request.form.get("to_datasource", "")
 
 	try:
-		dataset = DataSet(key=dataset_key, db=db)
-	except TypeError:
+		dataset = DataSet(key=dataset_key, db=db, modules=fourcat_modules)
+	except DataSetException:
 		return error(404, error="Dataset does not exist.")
 
 	if not current_user.is_admin:
@@ -586,8 +583,8 @@ def nuke_dataset(key=None, reason=None):
 		reason = "[no reason given]"
 
 	try:
-		dataset = DataSet(key=dataset_key, db=db)
-	except TypeError:
+		dataset = DataSet(key=dataset_key, db=db, modules=fourcat_modules)
+	except DataSetException:
 		return error(404, error="Dataset does not exist.")
 
 	if not current_user.is_admin:
@@ -627,10 +624,14 @@ def nuke_dataset(key=None, reason=None):
 	dataset.update_status("Dataset cancelled by instance administrator. Reason: %s" % reason)
 	dataset.finish(0)
 
-	return jsonify({"status": "success", "key": dataset.key})
+	if request.args.get("redirect") is not None:
+		return redirect(url_for("show_result", key=dataset.key))
+	else:
+		return jsonify({"status": "success", "key": dataset.key})
 
 
-@app.route("/api/delete-query/", methods=["DELETE", "POST"])
+@app.route("/api/delete-dataset/", defaults={"key": None}, methods=["DELETE", "GET", "POST"])
+@app.route("/api/delete-dataset/<string:key>/", methods=["DELETE", "GET", "POST"])
 @api_ratelimit
 @login_required
 @openapi.endpoint("tool")
@@ -655,11 +656,11 @@ def delete_dataset(key=None):
 	dataset_key = request.form.get("key", "") if not key else key
 
 	try:
-		dataset = DataSet(key=dataset_key, db=db)
-	except TypeError:
+		dataset = DataSet(key=dataset_key, db=db, modules=fourcat_modules)
+	except DataSetException:
 		return error(404, error="Dataset does not exist.")
 
-	if not current_user.is_admin and not current_user.get_id() == dataset.owner:
+	if not config.get("privileges.admin.can_manipulate_all_datasets") and not dataset.is_accessible_by(current_user, "owner"):
 		return error(403, message="Not allowed")
 
 	# if there is an active or queued job for some child dataset, cancel and
@@ -685,10 +686,19 @@ def delete_dataset(key=None):
 		return error(500,
 					 message="The 4CAT backend is not available. Try again in a minute or contact the instance maintainer if the problem persists.")
 
+	# do we have a parent?
+	parent_dataset = DataSet(key=dataset.key_parent, db=db, modules=fourcat_modules) if dataset.key_parent else None
+
 	# and delete the dataset and child datasets
 	dataset.delete()
 
-	return jsonify({"status": "success", "key": dataset.key})
+	if request.args.get("redirect") is not None:
+		if parent_dataset:
+			return redirect(url_for("show_result", key=parent_dataset.key))
+		else:
+			return redirect(url_for("show_results"))
+	else:
+		return jsonify({"status": "success", "key": dataset.key})
 
 
 @app.route("/api/erase-credentials/", methods=["DELETE"])
@@ -716,18 +726,186 @@ def erase_credentials(key=None):
 	dataset_key = request.form.get("key", "") if not key else key
 
 	try:
-		dataset = DataSet(key=dataset_key, db=db)
-	except TypeError:
+		dataset = DataSet(key=dataset_key, db=db, modules=fourcat_modules)
+	except DataSetException:
 		return error(404, error="Dataset does not exist.")
 
-	if not current_user.is_admin and not current_user.get_id() == dataset.owner:
+	if not config.get("privileges.admin.can_manipulate_all_datasets") and not dataset.is_accessible_by(current_user, "owner"):
 		return error(403, message="Not allowed")
 
 	for field in dataset.parameters:
 		if field.startswith("api_"):
 			dataset.delete_parameter(field, instant=True)
 
-	return jsonify({"status": "success", "key": dataset.key})
+	if request.args.get("redirect") is not None:
+		flash("Credentials erased.")
+		return redirect(url_for("show_result", key=dataset.key))
+	else:
+		return jsonify({"status": "success", "key": dataset.key})
+
+
+@app.route("/api/remove-tag/", methods=["GET"])
+@api_ratelimit
+@login_required
+@setting_required("privileges.admin.can_manage_tags")
+@openapi.endpoint("tool")
+def remove_tag():
+	"""
+	Remove tag from all users with that tag
+
+	:return: A dictionary with a successful `status`.
+
+	:return-schema: {type=object,properties={status={type=string}}}
+
+	:return-error 403:  If the user is not an administrator or the owner
+	:request-param str tag:  Tag to remove
+	"""
+	tag = request.args.get("tag")
+
+	tagged_users = db.fetchall("SELECT * FROM users WHERE tags @> %s ", (json.dumps([tag]),))
+	all_tags = list(set(itertools.chain(*[u["tags"] for u in db.fetchall("SELECT DISTINCT tags FROM users")])))
+	all_tags += [s["tag"] for s in db.fetchall("SELECT DISTINCT tag FROM settings WHERE tag LIKE 'user:%'")]
+
+	for user in tagged_users:
+		user = User.get_by_name(db, user["name"])
+		user.remove_tag(tag)
+
+	if tag in all_tags:
+		all_tags.remove(tag)
+
+	# all_tags is now our canonical list of tags
+	# clean up settings
+	# delete all tagged settings for tags that are no longer in use
+	configured_tags = [t["tag"] for t in db.fetchall("SELECT DISTINCT tag FROM settings")]
+	for configured_tag in configured_tags:
+		if configured_tag and configured_tag not in all_tags:
+			db.delete("settings", where={"tag": configured_tag})
+
+	# we do not re-sort here, since we are preserving the original order, just
+	# without any of the deleted or orphaned tags
+	config.set("flask.tag_order", all_tags, tag="")
+
+	if request.args.get("redirect") is not None:
+		flash("Tag removed.")
+		return redirect(url_for("manipulate_tags"))
+	else:
+		return jsonify({"status": "success"})
+
+@app.route("/api/add-dataset-owner/", methods=["POST"])
+@api_ratelimit
+@login_required
+@openapi.endpoint("tool")
+def add_dataset_owner(key=None, username=None, role=None):
+	"""
+	Add an owner to the dataset
+
+	Add a user (if they exist) as an owner to the given dataset. The role of
+	the owner can be specified ('owner' or 'viewer') and will determine what
+	they can do with the dataset. If the user is already an owner, the role
+	is potentially updated.
+
+	:request-param str key:  ID of the dataset to add an owner to
+	:request-param str username:  Username to add as owner, or a
+	comma-separated of usernames
+	:request-param str role?:  Role to add. Defaults to 'owner'.
+
+	:return: A dictionary with a successful `status`.
+
+	:return-schema: {type=object,properties={status={type=string},html={type=string},key={type=string}}}
+
+	:return-error 404:  If the dataset or user do not exist.
+	:return-error 403:  If the user is not an administrator or the owner
+
+	:param str key:  Dataset key; `None` will use the GET parameter
+	:param str username:  Username; `None` will use the GET parameter
+	:param str role:  Role; `None` will use the GET parameter
+	"""
+	dataset_key = request.form.get("key", "") if not key else key
+	usernames = request.form.get("name", "") if not username else username
+
+	try:
+		dataset = DataSet(key=dataset_key, db=db, modules=fourcat_modules)
+	except DataSetException:
+		return error(404, error="Dataset does not exist.")
+
+	if not config.get("privileges.admin.can_manipulate_all_datasets") and not dataset.is_accessible_by(current_user, "owner"):
+		return error(403, message="Not allowed")
+
+	for username in usernames.split(","):
+		username = username.strip()
+		new_owner = User.get_by_name(db, username)
+		if new_owner is None and not username.startswith("tag:"):
+			return error(404, error=f"The user '{username}' does not exist. Use tag:example to add a tag as an owner.")
+
+		role = request.form.get("role", "owner") if not role else role
+		if role not in ("owner", "viewer"):
+			role = "owner"
+
+		dataset.add_owner(username, role)
+
+	html = render_template("components/dataset-owner.html", owner=username, role=role,
+								  current_user=current_user, dataset=dataset)
+
+	if request.args.get("redirect") is not None:
+		flash("Dataset owner added.")
+		return redirect(url_for("show_result", key=dataset_key))
+	else:
+		return jsonify({
+			"status": "success",
+			"key": dataset.key,
+			"html": html
+		})
+
+
+@app.route("/api/remove-dataset-owner/", methods=["DELETE"])
+@api_ratelimit
+@login_required
+@openapi.endpoint("tool")
+def remove_dataset_owner(key=None, username=None):
+	"""
+	Add an owner to the dataset
+
+	Remove a user (if they exist) as an owner from the given dataset. If no
+	owners are left afterwards, the dataset will be owned by 'anonymous'.
+
+	:request-param str key:  ID of the dataset to remove an owner from
+	:request-param str username:  Username to remove as owner
+
+	:return: A dictionary with a successful `status`.
+
+	:return-schema: {type=object,properties={status={type=string},key={type=string}}}
+
+	:return-error 404:  If the dataset or user do not exist.
+	:return-error 403:  If the user is not an administrator or the owner
+
+	:param str key:  Dataset key; `None` will use the GET parameter
+	:param str username:  Username; `None` will use the GET parameter
+	"""
+	dataset_key = request.form.get("key", "") if not key else key
+	username = request.form.get("name", "") if not username else username
+
+	try:
+		dataset = DataSet(key=dataset_key, db=db, modules=fourcat_modules)
+	except DataSetException:
+		return error(404, error="Dataset does not exist.")
+
+	if not config.get("privileges.admin.can_manipulate_all_datasets") and not dataset.is_accessible_by(current_user, "owner"):
+		return error(403, error="Not allowed")
+
+	if username == current_user.get_id():
+		return error(403, error="You cannot remove yourself from a dataset.")
+
+	owner = User.get_by_name(db, username)
+	if owner is None and not username.startswith("tag:"):
+		return error(404, error="User does not exist.")
+
+	dataset.remove_owner(username)
+
+	if request.args.get("redirect") is not None:
+		flash("Dataset owner removed.")
+		return redirect(url_for("show_result", key=dataset_key))
+	else:
+		return jsonify({"status": "success", "key": dataset.key})
 
 
 @app.route("/api/check-search-queue/")
@@ -741,9 +919,16 @@ def check_search_queue():
 
 	:return-schema: {type=array,properties={jobtype={type=string}, count={type=integer}},items={type=string}}
 	"""
-	unfinished_datasets = db.fetchall("SELECT jobtype, COUNT(*)count FROM jobs WHERE jobtype LIKE '%-search' GROUP BY jobtype ORDER BY count DESC;")
+	unfinished_jobs = db.fetchall("SELECT jobtype, COUNT(*)count FROM jobs WHERE jobtype LIKE '%-search' GROUP BY jobtype ORDER BY count DESC;")
 
-	return jsonify(unfinished_datasets)
+	for i, job in enumerate(unfinished_jobs):
+		processor = fourcat_modules.processors.get(job["jobtype"])
+		if processor:
+			unfinished_jobs[i]["processor_name"] = processor.title
+		else:
+			unfinished_jobs[i]["processor_name"] = job["jobtype"]
+
+	return jsonify(unfinished_jobs)
 
 @app.route("/api/toggle-dataset-favourite/<string:key>")
 @login_required
@@ -763,8 +948,8 @@ def toggle_favourite(key):
 	:return-error 404:  If the dataset key was not found
 	"""
 	try:
-		dataset = DataSet(key=key, db=db)
-	except TypeError:
+		dataset = DataSet(key=key, db=db, modules=fourcat_modules)
+	except DataSetException:
 		return error(404, error="Dataset does not exist.")
 
 	if not current_user.can_access_dataset(dataset):
@@ -774,10 +959,14 @@ def toggle_favourite(key):
 								 (current_user.get_id(), dataset.key))
 	if not current_status:
 		db.insert("users_favourites", data={"name": current_user.get_id(), "key": dataset.key})
-		return jsonify({"success": True, "favourite_status": True})
 	else:
 		db.delete("users_favourites", where={"name": current_user.get_id(), "key": dataset.key})
-		return jsonify({"success": True, "favourite_status": False})
+
+	if request.args.get("redirect") is not None:
+		flash("Dataset favourite status updated.")
+		return redirect(url_for("show_result", key=dataset.key))
+	else:
+		return jsonify({"success": True, "favourite_status": not current_status})
 
 @app.route("/api/toggle-dataset-private/<string:key>")
 @login_required
@@ -799,22 +988,27 @@ def toggle_private(key):
 	:return-error 404:  If the dataset key was not found
 	"""
 	try:
-		dataset = DataSet(key=key, db=db)
-	except TypeError:
+		dataset = DataSet(key=key, db=db, modules=fourcat_modules)
+	except DataSetException:
 		return error(404, error="Dataset does not exist.")
 
-	if dataset.owner != current_user.get_id() and not current_user.is_admin():
+	if not config.get("privileges.admin.can_manipulate_all_datasets") and not dataset.is_accessible_by(current_user, "owner"):
 		return error(403, error="This dataset is private")
 
 	# apply status to dataset and all children
 	dataset.is_private = not dataset.is_private
 	dataset.update_children(is_private=dataset.is_private)
 
-	return jsonify({"success": True, "is_private": dataset.is_private})
+	if request.args.get("redirect") is not None:
+		flash("Dataset private status toggled.")
+		return redirect(url_for("show_result", key=dataset.key))
+	else:
+		return jsonify({"success": True, "is_private": dataset.is_private})
 
 @app.route("/api/queue-processor/", methods=["POST"])
 @api_ratelimit
 @login_required
+@setting_required("privileges.can_run_processors")
 @openapi.endpoint("tool")
 def queue_processor(key=None, processor=None):
 	"""
@@ -847,22 +1041,7 @@ def queue_processor(key=None, processor=None):
 		messages={type=array,items={type=string}}
 	}}}
 	"""
-	if request.files and "input_file" in request.files:
-		input_file = request.files["input_file"]
-		if not input_file:
-			return error(400, error="No file input provided")
-
-		if input_file.filename[-4:] != ".csv":
-			return error(400, error="File input is not a csv file")
-
-		test_csv_file = csv.DictReader(input_file.stream)
-		if "body" not in test_csv_file.fieldnames:
-			return error(400, error="File must contain a 'body' column")
-
-		filename = secure_filename(input_file.filename)
-		input_file.save(str(config.get('PATH_DATA')) + "/")
-
-	elif not key:
+	if not key:
 		key = request.form.get("key", "")
 
 	if not processor:
@@ -870,33 +1049,48 @@ def queue_processor(key=None, processor=None):
 
 	# cover all bases - can only run processor on "parent" dataset
 	try:
-		dataset = DataSet(key=key, db=db)
-	except TypeError:
+		dataset = DataSet(key=key, db=db, modules=fourcat_modules)
+	except DataSetException:
 		return error(404, error="Not a valid dataset key.")
 
-	if not current_user.can_access_dataset(dataset):
+	if not config.get("privileges.admin.can_manipulate_all_datasets") and not current_user.can_access_dataset(dataset):
 		return error(403, error="You cannot run processors on private datasets")
 
 	# check if processor is available for this dataset
-	available_processors = dataset.get_available_processors()
+	available_processors = dataset.get_available_processors(user=current_user, exclude_hidden=True)
 	if processor not in available_processors:
 		return error(404, error="This processor is not available for this dataset or has already been run.")
 
-	# create a dataset now
+	processor_worker = available_processors[processor]
 	try:
-		options = UserInput.parse_all(available_processors[processor].get_options(dataset, current_user), request.form.to_dict(), silently_correct=False)
+		sanitised_query = UserInput.parse_all(processor_worker.get_options(dataset, current_user), request.form,
+											  silently_correct=False)
+
+		if hasattr(processor_worker, "validate_query"):
+			# validate_query is optional for processors
+			sanitised_query = processor_worker.validate_query(sanitised_query, request, current_user)
+
 	except QueryParametersException as e:
-		return error(400, error=str(e))
+		# parameters need amending
+		return jsonify({"status": "error", "message": (str(e) if e else "Cannot run the processor with these settings.")})
+
+
+	if request.form.to_dict().get("email-complete", False):
+		sanitised_query["email-complete"] = request.form.to_dict().get("email-user", False)
 
 	# private or not is inherited from parent dataset
 	analysis = DataSet(parent=dataset.key,
-					   parameters=options,
+					   parameters=sanitised_query,
 					   db=db,
 					   extension=available_processors[processor].get_extension(parent_dataset=dataset),
 					   type=processor,
 					   is_private=dataset.is_private,
-					   owner=current_user.get_id()
+					   owner=current_user.get_id(),
+					   modules=fourcat_modules
 	)
+
+	# give same ownership as parent dataset
+	analysis.copy_ownership_from(dataset)
 
 	if analysis.is_new:
 		# analysis has not been run or queued before - queue a job to run it
@@ -908,12 +1102,15 @@ def queue_processor(key=None, processor=None):
 		flash("This analysis (%s) is currently queued or has already been run with these parameters." %
 			  available_processors[processor].title)
 
+	if hasattr(processor_worker, "after_create"):
+		processor_worker.after_create(sanitised_query, analysis, request)
+
 	return jsonify({
 		"status": "success",
 		"container": "*[data-dataset-key=" + dataset.key + "]",
 		"key": analysis.key,
-		"html": render_template("result-child.html", child=analysis, dataset=dataset, parent_key=dataset.key,
-                                processors=backend.all_modules.processors) if analysis.is_new else "",
+		"html": render_template("components/result-child.html", child=analysis, dataset=dataset, parent_key=dataset.key,
+                                processors=fourcat_modules.processors) if analysis.is_new else "",
 		"messages": get_flashed_messages(),
 		"is_filter": available_processors[processor].is_filter()
 	})
@@ -950,8 +1147,8 @@ def check_processor():
 
 	for key in keys:
 		try:
-			dataset = DataSet(key=key, db=db)
-		except TypeError:
+			dataset = DataSet(key=key, db=db, modules=fourcat_modules)
+		except DataSetException:
 			continue
 
 		if not current_user.can_access_dataset(dataset):
@@ -965,65 +1162,19 @@ def check_processor():
 			"key": dataset.key,
 			"finished": dataset.is_finished(),
 			"progress": round(dataset.get_progress() * 100),
-			"html": render_template("result-child.html", child=dataset, dataset=parent,
+			"html": render_template("components/result-child.html", child=dataset, dataset=parent,
                                     query=dataset.get_genealogy()[0], parent_key=top_parent.key,
-                                    processors=backend.all_modules.processors),
-			"resultrow_html": render_template("result-result-row.html", dataset=top_parent),
+                                    processors=fourcat_modules.processors),
+			"resultrow_html": render_template("components/result-result-row.html", dataset=top_parent),
 			"url": "/result/" + dataset.data["result_file"]
 		})
 
 	return jsonify(children)
 
 
-@app.route("/api/datasource-call/<string:datasource>/<string:action>/", methods=["GET", "POST"])
-@login_required
-@openapi.endpoint("tool")
-def datasource_call(datasource, action):
-	"""
-	Call datasource function
-
-	Datasources may define custom API calls as functions in a file
-	'webtool/views_misc.py'. These are then available as 'actions' with this API
-	endpoint. Any GET parameters are passed as keyword arguments to the
-	function.
-
-	:param str action:  Action to call
-	:return:  A JSON object
-	"""
-	# allow prettier URLs
-	action = action.replace("-", "_")
-
-	if datasource not in backend.all_modules.datasources:
-		return error(404, error="Datasource not found.")
-
-	forbidden_call_name = re.compile(r"[^a-zA-Z0-9_]")
-	if forbidden_call_name.findall(action) or action[0:2] == "__":
-		return error(400, error="Datasource '%s' has no call '%s'" % (datasource, action))
-
-	folder = backend.all_modules.datasources[datasource]["path"]
-	views_file = folder.joinpath("webtool", "views.py")
-	if not views_file.exists():
-		return error(400, error="Datasource '%s' has no call '%s'" % (datasource, action))
-
-	datasource_id = backend.all_modules.datasources[datasource]["id"]
-	datasource_calls = importlib.import_module("datasources.%s.webtool.views" % datasource_id)
-
-	if not hasattr(datasource_calls, action) or not callable(getattr(datasource_calls, action)):
-		return error(400, error="Datasource '%s' has no call '%s'" % (datasource, action))
-
-	parameters = request.args if request.method == "GET" else request.form
-	response = getattr(datasource_calls, action).__call__(request, current_user, **parameters)
-
-	if not response:
-		return error(400, success=False)
-	elif response is True:
-		return jsonify({"success": True})
-	else:
-		return jsonify({"success": True, "data": response})
-
-
 @app.route("/api/request-token/")
 @login_required
+@setting_required("privileges.can_create_api_token")
 @openapi.endpoint("tool")
 def request_token():
 	"""
@@ -1068,3 +1219,42 @@ def request_token():
 	else:
 		# show JSON response (by default)
 		return jsonify(token)
+
+@app.route("/api/export-packed-dataset/<string:key>/<string:component>/")
+@login_required
+@setting_required("privileges.can_export_datasets")
+def export_packed_dataset(key=None, component=None):
+	"""
+	Export dataset for importing in another 4CAT instance
+
+	:param key:
+	:param component:
+	:return:
+	"""
+	try:
+		dataset = DataSet(key=key, db=db, modules=fourcat_modules)
+	except DataSetException:
+		return error(404, error="Dataset not found.")
+
+	if not current_user.can_access_dataset(dataset=dataset, role="owner"):
+		return error(403, error=f"You cannot export this dataset. {current_user}")
+
+	if not dataset.is_finished():
+		return error(403, error="You cannot export unfinished datasets.")
+
+	if component == "metadata":
+		return jsonify(dataset.get_metadata())
+
+	elif component == "children":
+		children = [d["key"] for d in db.fetchall("SELECT key FROM datasets WHERE key_parent = %s AND is_finished = TRUE", (dataset.key,))]
+		return jsonify(children)
+
+	elif component in ("data", "log"):
+		filepath = dataset.get_results_path() if component == "data" else dataset.get_results_path().with_suffix(".log")
+		if not filepath.exists():		# def stream_data_content(datafile):
+			return error(404, error=f"File for {component} not found")
+		else:
+			return send_from_directory(directory=filepath.parent, path=filepath.name)
+
+	else:
+		return error(406, error="Dataset component unknown")

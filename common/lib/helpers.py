@@ -5,12 +5,11 @@ import subprocess
 import imagehash
 import hashlib
 import requests
-import hashlib
 import datetime
 import smtplib
 import fnmatch
 import socket
-import shlex
+import oslex
 import copy
 import time
 import json
@@ -30,9 +29,9 @@ from calendar import monthrange
 from packaging import version
 from PIL import Image
 
-from common.lib.user_input import UserInput
 from common.config_manager import config
-
+from common.lib.user_input import UserInput
+__all__ = ("UserInput",)
 
 def init_datasource(database, logger, queue, name):
     """
@@ -104,7 +103,7 @@ def sniff_encoding(file):
     :param file:
     :return:
     """
-    if type(file) == bytearray:
+    if type(file) is bytearray:
         maybe_bom = file[:3]
     elif hasattr(file, "getbuffer"):
         buffer = file.getbuffer()
@@ -149,14 +148,14 @@ def get_git_branch():
     """
     try:
         root_dir = str(config.get('PATH_ROOT').resolve())
-        branch = subprocess.run(shlex.split(f"git -C {shlex.quote(root_dir)} branch --show-current"), stdout=subprocess.PIPE)
+        branch = subprocess.run(oslex.split(f"git -C {oslex.quote(root_dir)} branch --show-current"), stdout=subprocess.PIPE)
         if branch.returncode != 0:
             raise ValueError()
         branch_name = branch.stdout.decode("utf-8").strip()
         if not branch_name:
             # Check for detached HEAD state
             # Most likely occuring because of checking out release tags (which are not branches) or commits
-            head_status = subprocess.run(shlex.split(f"git -C {shlex.quote(root_dir)} status"), stdout=subprocess.PIPE)
+            head_status = subprocess.run(oslex.split(f"git -C {oslex.quote(root_dir)} status"), stdout=subprocess.PIPE)
             if head_status.returncode == 0:
                 for line in head_status.stdout.decode("utf-8").split("\n"):
                     if any([detached_message in line for detached_message in ("HEAD detached from", "HEAD detached at")]):
@@ -199,8 +198,8 @@ def get_software_commit(worker=None):
             relative_filepath = Path(re.sub(r"^[/\\]+", "", worker.filepath)).parent
             working_dir = str(config.get("PATH_ROOT").joinpath(relative_filepath).resolve())
             # check if we are in the extensions' own repo or 4CAT's
-            git_cmd = f"git -C {shlex.quote(working_dir)} rev-parse --show-toplevel"
-            repo_level = subprocess.run(shlex.split(git_cmd), stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+            git_cmd = f"git -C {oslex.quote(working_dir)} rev-parse --show-toplevel"
+            repo_level = subprocess.run(oslex.split(git_cmd), stderr=subprocess.PIPE, stdout=subprocess.PIPE)
             if Path(repo_level.stdout.decode("utf-8")) == config.get("PATH_ROOT"):
                 # not its own repository
                 return ("", "")
@@ -208,20 +207,20 @@ def get_software_commit(worker=None):
         else:
             working_dir = str(config.get("PATH_ROOT").resolve())
 
-        show = subprocess.run(shlex.split(f"git -C {shlex.quote(working_dir)} show"), stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        show = subprocess.run(oslex.split(f"git -C {oslex.quote(working_dir)} show"), stderr=subprocess.PIPE, stdout=subprocess.PIPE)
         if show.returncode != 0:
             raise ValueError()
         commit = show.stdout.decode("utf-8").split("\n")[0].split(" ")[1]
 
         # now get the repository the commit belongs to, if we can
-        origin = subprocess.run(shlex.split(f"git -C {shlex.quote(working_dir)} config --get remote.origin.url"), stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        origin = subprocess.run(oslex.split(f"git -C {oslex.quote(working_dir)} config --get remote.origin.url"), stderr=subprocess.PIPE, stdout=subprocess.PIPE)
         if origin.returncode != 0 or not origin.stdout:
             raise ValueError()
         repository = origin.stdout.decode("utf-8").strip()
         if repository.endswith(".git"):
             repository = repository[:-4]
 
-    except (subprocess.SubprocessError, IndexError, TypeError, ValueError, FileNotFoundError) as e:
+    except (subprocess.SubprocessError, IndexError, TypeError, ValueError, FileNotFoundError):
         return ("", "")
 
     return (commit, repository)
@@ -336,7 +335,7 @@ def find_extensions():
             # try to get remote URL
             try:
                 extension_root = str(extension_folder.resolve())
-                origin = subprocess.run(shlex.split(f"git -C {shlex.quote(extension_root)} config --get remote.origin.url"), stderr=subprocess.PIPE,
+                origin = subprocess.run(oslex.split(f"git -C {oslex.quote(extension_root)} config --get remote.origin.url"), stderr=subprocess.PIPE,
                                         stdout=subprocess.PIPE)
                 if origin.returncode != 0 or not origin.stdout:
                     raise ValueError()
@@ -691,12 +690,12 @@ def get_interval_descriptor(item, interval, item_column="timestamp"):
         timestamp = int(item[item_column])
         try:
             timestamp = datetime.datetime.fromtimestamp(timestamp)
-        except (ValueError, TypeError) as e:
+        except (ValueError, TypeError):
             raise ValueError("Invalid timestamp '%s'" % str(item["timestamp"]))
-    except:
+    except (TypeError, ValueError):
         try:
             timestamp = datetime.datetime.strptime(item["timestamp"], "%Y-%m-%d %H:%M:%S")
-        except (ValueError, TypeError) as e:
+        except (ValueError, TypeError):
             raise ValueError("Invalid date '%s'" % str(item["timestamp"]))
 
     if interval == "year":
@@ -1047,7 +1046,7 @@ def send_email(recipient, message):
             server.login(config.get('mail.username'), config.get('mail.password'))
 
         # Send message
-        if type(message) == str:
+        if type(message) is str:
             server.sendmail(config.get('mail.noreply'), recipient, message)
         else:
             server.sendmail(config.get('mail.noreply'), recipient, message.as_string())
@@ -1088,9 +1087,9 @@ def sets_to_lists(d: MutableMapping):
     :return dict:  A new dictionary with the no nested sets
     """
 
-    def _check_list(l):
+    def _check_list(lst):
         return [sets_to_lists(item) if isinstance(item, MutableMapping) else _check_list(item) if isinstance(item, (
-        set, list)) else item for item in l]
+        set, list)) else item for item in lst]
 
     def _sets_to_lists_gen(d):
         for k, v in d.items():

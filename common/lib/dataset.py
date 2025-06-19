@@ -9,14 +9,11 @@ import time
 import csv
 import re
 
-from pathlib import Path
-
 from common.config_manager import config
 from common.lib.annotation import Annotation
 from common.lib.job import Job, JobNotFoundException
 from common.lib.module_loader import ModuleCollector
-from common.lib.helpers import convert_to_float, get_software_commit, NullAwareTextIOWrapper, convert_to_int, get_software_version, call_api
-from common.lib.item_mapping import MappedItem, MissingMappedField, DatasetItem
+from common.lib.helpers import convert_to_float, get_software_version, call_api
 from common.lib.helpers import get_software_commit, NullAwareTextIOWrapper, convert_to_int, hash_to_md5
 from common.lib.item_mapping import MappedItem, DatasetItem
 from common.lib.fourcat_module import FourcatModule
@@ -107,7 +104,7 @@ class DataSet(FourcatModule):
 				raise DataSetNotFoundException("DataSet() requires a valid dataset key for its 'key' argument, \"%s\" given" % key)
 
 		elif job is not None:
-			current = self.db.fetchone("SELECT * FROM datasets WHERE parameters::json->>'job' = %s", (job,))
+			current = self.db.fetchone("SELECT * FROM datasets WHERE (parameters::json->>'job')::text = %s", (str(job),))
 			if not current:
 				raise DataSetNotFoundException("DataSet() requires a valid job ID for its 'job' argument")
 
@@ -776,7 +773,7 @@ class DataSet(FourcatModule):
 		Check if dataset is finished
 		:return bool:
 		"""
-		return self.data["is_finished"] == True
+		return bool(self.data["is_finished"])
 
 	def is_rankable(self, multiple_items=True):
 		"""
@@ -1630,7 +1627,7 @@ class DataSet(FourcatModule):
 		:todo: If the job column ever gets used, make sure it always contains
 		       a valid value, rather than silently failing this method.
 		"""
-		if type(job) != Job:
+		if type(job) is not Job:
 			raise TypeError("link_job requires a Job object as its argument")
 
 		if "id" not in job.data:

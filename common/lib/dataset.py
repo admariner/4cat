@@ -2418,7 +2418,7 @@ class DataSet(FourcatModule):
         # Fallback for non-Flask contexts (e.g., backend and workers)
         scheme = "https" if self.modules.config.get("flask.https") else "http"
         server = self.modules.config.get("flask.server_name")
-        return f"{scheme}://{server}/result/{self.key}/{query_file}"
+        return f"{scheme}://{server}/download/{self.key}/"
 
     def warn_unmappable_item(
             self, item_count, processor=None, error_message=None, warn_admins=True

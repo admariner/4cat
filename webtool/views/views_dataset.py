@@ -189,6 +189,7 @@ def _serve_zip_member(archive_path: Path, member: str, dataset: DataSet):
     response.call_on_close(lambda: dataset.remove_disposable_files())
     return response
 
+@component.route('/download/<string:dataset_key>/<path:query_file>')
 @component.route('/download/<string:dataset_key>/')
 def get_result(dataset_key=None, dataset=None, query_file=None, zip_member=None):
     """
@@ -232,23 +233,29 @@ def get_result(dataset_key=None, dataset=None, query_file=None, zip_member=None)
     
     # Security: Build and validate the full path
     data_root = g.config.get('PATH_DATA')
+    results_folder = dataset.get_results_folder_path()
     requested_file = data_root.joinpath(query_file)
-    
+
+    # If the file doesn't exist relative to data_root, try the dataset's results folder.
+    # Static HTML pages reference assets via relative URL paths rather than query params.
+    if not requested_file.exists():
+        fallback = results_folder / query_file
+        if fallback.exists():
+            query_file = str(fallback.relative_to(data_root))
+            requested_file = data_root / query_file
+
     try:
-        # Resolve the path to ensure it is within the data directory
         resolved_path = requested_file.resolve(strict=True)
-
-        # Check if it's the main results file
-        if resolved_path == dataset.get_results_path().resolve():
-            if not dataset.get_results_path().exists():
-                return error(404, error="Result file not found.")
-        else:
-            # Check if it's within the dataset's results folder
-            # relative_to() raises ValueError if not relative
-            resolved_path.relative_to(dataset.get_results_folder_path().resolve())
-
-    except (OSError, ValueError, FileNotFoundError):
+    except (OSError, FileNotFoundError):
         return error(404, error="File not found.")
+
+    try:
+        # Must be within data_root and within the dataset's results folder (or the main results file)
+        resolved_path.relative_to(data_root.resolve())
+        if resolved_path != dataset.get_results_path().resolve():
+            resolved_path.relative_to(results_folder.resolve())
+    except ValueError:
+        return error(403, error="Access denied.")
 
     if zip_member:
         # resolved_path already validated above to be within dataset scope

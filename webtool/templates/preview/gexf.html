@@ -2,10 +2,10 @@
 <head>
     <title>4CAT &bull; Network visualisation &bull; {{ dataset.get_label() }}
         ({{ dataset.get_results_path().name }})</title>
-    <script type="text/javascript" src="{{ url_for("static", filename="js/sigma/sigma.min.js") }}"></script>
-    <script type="text/javascript" src="{{ url_for("static", filename="js/sigma/graphology.min.js") }}"></script>
+    <script type="text/javascript" src="{{ url_for("static", filename="js/lib/sigma/sigma.min.js") }}"></script>
+    <script type="text/javascript" src="{{ url_for("static", filename="js/lib/sigma/graphology.min.js") }}"></script>
     <script type="text/javascript"
-            src="{{ url_for("static", filename="js/sigma/graphology-library.min.js") }}"></script>
+            src="{{ url_for("static", filename="js/lib/sigma/graphology-library.min.js") }}"></script>
     <link rel="stylesheet" type="text/css" href="{{ url_for("static", filename="css/sigma_network.css") }}">
     <link href="{{ url_for("static", filename="fontawesome/css/fontawesome.css") }}" rel="stylesheet">
     <link href="{{ url_for("static", filename="fontawesome/css/regular.css") }}" rel="stylesheet">

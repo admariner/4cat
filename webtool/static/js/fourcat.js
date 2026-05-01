@@ -1,6 +1,6 @@
 async function load() {
     const imported_modules = [
-        await import("./modules/lib.js"),
+        await import("./modules/util.js"),
 
         await import("./modules/create-dataset.js"),
         await import("./modules/dataset-page.js"),

@@ -1,4 +1,4 @@
-import {find_parent, getRelativeURL} from "./lib.js";
+import {find_parent, getRelativeURL} from "./util.js";
 import {popup} from "./popup.js";
 import {ui_helpers} from "./ui-helpers.js";
 import {query} from "./create-dataset.js";

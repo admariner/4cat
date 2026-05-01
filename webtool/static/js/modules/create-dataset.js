@@ -1,4 +1,4 @@
-import {applyProgress, FileReaderPromise, find_parent, getRelativeURL} from "./lib.js";
+import {applyProgress, FileReaderPromise, find_parent, getRelativeURL} from "./util.js";
 import {popup} from "./popup.js";
 import {ui_helpers} from "./ui-helpers.js";
 import {multichoice} from "./multichoice.js";
